@@ -1,0 +1,16 @@
+[package]
+name = "forgeusb-privileged"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+[[bin]]
+name = "forgeusb-helper"
+path = "src/main.rs"
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+forgeusb-linux = { path = "../forgeusb-linux" }
+forgeusb-core = { path = "../forgeusb-core" }
+libc.workspace = true
+forgeusb-image = { path = "../forgeusb-image" }

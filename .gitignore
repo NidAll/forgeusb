@@ -1,0 +1,9 @@
+/target/
+/references/
+/test-output/
+*.img
+*.iso
+/dist/
+/.cargo-config-note
+__pycache__/
+*.pyc

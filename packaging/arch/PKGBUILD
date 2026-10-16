@@ -1,0 +1,28 @@
+# Local-source development package. Run packaging/make-source-archive.sh first.
+pkgname=forgeusb
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Native Linux USB image writer with explicit device safety and verification'
+arch=('x86_64')
+license=('GPL-3.0-or-later')
+depends=('glibc' 'gcc-libs' 'util-linux' 'polkit' 'libxkbcommon' 'fontconfig')
+makedepends=('rust' 'cargo' 'make')
+optdepends=('wimlib: standalone unprivileged WIM staging' 'wayland: Wayland display session' 'libx11: X11 display session')
+source=("forgeusb-${pkgver}.tar.gz")
+# Updated to an exact SHA-256 by make-source-archive.sh in its generated recipe copy.
+sha256sums=('REGENERATE_WITH_MAKE_SOURCE_ARCHIVE')
+
+build() {
+  cd "${srcdir}/forgeusb-${pkgver}"
+  cargo build --release --locked
+}
+
+check() {
+  cd "${srcdir}/forgeusb-${pkgver}"
+  cargo test --workspace --locked
+}
+
+package() {
+  cd "${srcdir}/forgeusb-${pkgver}"
+  make -f packaging/Makefile install DESTDIR="${pkgdir}"
+}

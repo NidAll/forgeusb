@@ -1,0 +1,18 @@
+[package]
+name = "forgeusb-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+[[bin]]
+name = "forgeusb-gui"
+path = "src/main.rs"
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+iced.workspace = true
+libc.workspace = true
+forgeusb-core = { path = "../../crates/forgeusb-core" }
+forgeusb-device = { path = "../../crates/forgeusb-device" }
+forgeusb-image = { path = "../../crates/forgeusb-image" }
+forgeusb-linux = { path = "../../crates/forgeusb-linux" }

@@ -1,0 +1,19 @@
+[package]
+name = "forgeusb-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+forgeusb-core = { path = "../forgeusb-core" }
+sha2.workspace = true
+forgeusb-device = { path = "../forgeusb-device" }
+forgeusb-image = { path = "../forgeusb-image" }
+forgeusb-verify = { path = "../forgeusb-verify" }
+forgeusb-boot = { path = "../forgeusb-boot" }
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,86 @@
+{
+  "validated_on": "2026-10-17",
+  "timezone": "Africa/Algiers",
+  "project": "<home>/Projects/forgeusb",
+  "version": "0.1.0",
+  "status": "initial_engineering_build",
+  "gates": {
+    "cargo_fmt": true,
+    "cargo_clippy_warnings_denied": true,
+    "cargo_test": true,
+    "unit_tests_passed": 42,
+    "cargo_build_release": true,
+    "disposable_file_integration": {
+      "tests": [
+        {
+          "layout": "dos",
+          "filesystem": "fat32",
+          "read_only_plan": true,
+          "write_readback": true,
+          "overwrite_refused": true,
+          "corruption_detected": true
+        },
+        {
+          "layout": "gpt",
+          "filesystem": "fat32",
+          "read_only_plan": true,
+          "write_readback": true,
+          "overwrite_refused": true,
+          "corruption_detected": true
+        },
+        {
+          "layout": "dos",
+          "filesystem": "ntfs",
+          "read_only_plan": true,
+          "write_readback": true,
+          "overwrite_refused": true,
+          "corruption_detected": true
+        },
+        {
+          "plain_optical_iso_refused": true
+        }
+      ],
+      "physical_writes": 0,
+      "loop_devices": 0
+    },
+    "release_gui_smoke": {
+      "ok": true,
+      "binary": "<home>/Projects/forgeusb/target/release/forgeusb-gui",
+      "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+      "exit_code": 0,
+      "target_created": false,
+      "private_display": ":100",
+      "preview_shortcut_sent": true,
+      "screenshots": [
+        "<home>/Projects/forgeusb/test-output/gui-final-path-smoke/gui-main.png",
+        "<home>/Projects/forgeusb/test-output/gui-final-path-smoke/gui-preview.png"
+      ],
+      "preview_visual_review_required": true,
+      "elapsed_seconds": 10.06,
+      "log": "<home>/Projects/forgeusb/test-output/gui-final-path-smoke/gui.log"
+    }
+  },
+  "boot": {
+    "synthetic_bios": "FORGEUSB_BIOS_BOOT_OK, exit 33",
+    "alpine_virt_3_24_2_sha256": "3ab424762af704b2c2a9e57df1dc37f982af260071504d977f2fb96822e7130b",
+    "alpine_bios": "Linux/OpenRC startup observed",
+    "alpine_uefi": "Linux localhost login reached with runtime console=ttyS0,115200; Secure Boot not enabled",
+    "physical": false,
+    "windows": false
+  },
+  "packaging": {
+    "staging_verified": true,
+    "deterministic_source_archives_compared": true,
+    "local_portable_bundle": true,
+    "arch_clean_build": false,
+    "debian_rpm_builds": false,
+    "privileged_installation": false,
+    "public_binary_distribution": false,
+    "unresolved_upstream_license_file": "drm-fourcc 2.2.0"
+  },
+  "binaries": {
+    "forgeusb": "23a87451fafdeafcdc2181bfa3728ace6693ecdeab1031b99740eaff6c26e556",
+    "forgeusb-gui": "ff4a5e9abff0293ad9967b2a6aefd83618aff654563b7231a77f75e520ab209a",
+    "forgeusb-helper": "95b22bad932e03a1409071c4d8225f67d78f66065f73bd581ebba8c6111511af"
+  }
+}

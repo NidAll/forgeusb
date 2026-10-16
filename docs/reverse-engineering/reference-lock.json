@@ -1,0 +1,41 @@
+{
+  "studied_on": "2026-10-16",
+  "references": [
+    {
+      "name": "rufus",
+      "origin": "https://github.com/pbatard/rufus.git",
+      "commit": "6d8fbf98305ff37eb531c45cbd6ff44563c53917",
+      "description": "v4.15",
+      "license_files": [
+        "LICENSE.txt"
+      ]
+    },
+    {
+      "name": "WoeUSB",
+      "origin": "https://github.com/WoeUSB/WoeUSB.git",
+      "commit": "4c1f1c9718218c5a22d945a72ed78a2b4a4977eb",
+      "description": "4c1f1c9",
+      "license_files": [
+        "LICENSES"
+      ]
+    },
+    {
+      "name": "WoeUSB-ng",
+      "origin": "https://github.com/WoeUSB/WoeUSB-ng.git",
+      "commit": "cc52ffc6aedad12540c2315c9101e4a4b919d4be",
+      "description": "cc52ffc",
+      "license_files": [
+        "COPYING"
+      ]
+    },
+    {
+      "name": "uefi-ntfs",
+      "origin": "https://github.com/pbatard/uefi-ntfs.git",
+      "commit": "e7b9a094fa7e8db5b646f70dbf44eedb9075c10d",
+      "description": "e7b9a09",
+      "license_files": [
+        "LICENSE.txt"
+      ]
+    }
+  ]
+}

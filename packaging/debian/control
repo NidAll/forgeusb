@@ -1,0 +1,15 @@
+Source: forgeusb
+Section: utils
+Priority: optional
+Maintainer: ForgeUSB contributors <maintainer@example.invalid>
+Build-Depends: debhelper-compat (= 13), cargo, rustc (>= 1.88), make, pkg-config
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: forgeusb
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, util-linux, policykit-1, libxkbcommon0, libfontconfig1
+Suggests: wimtools
+Description: Native Linux USB image writer
+ Inspect, plan, write and verify raw images with explicit target confirmation.
+ Windows installation-media creation is not yet implemented.
