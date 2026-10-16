@@ -37,7 +37,7 @@ jobs:
             libx11-dev libx11-xcb-dev libxcb1-dev libxcb-randr0-dev \
             libxcb-xfixes0-dev libxcb-shape0-dev libxcursor-dev libxi-dev \
             libxrandr-dev libxinerama-dev libxfixes-dev fonts-dejavu-core \
-            util-linux dosfstools ntfs-3g xorriso xvfb xauth
+            util-linux fdisk dosfstools ntfs-3g xorriso xvfb xauth
 
       - name: Install stable Rust, rustfmt, and Clippy
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
