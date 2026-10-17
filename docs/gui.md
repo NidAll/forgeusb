@@ -35,6 +35,8 @@ cargo run -p forgeusb-gui -- --image /absolute/path/linux.iso
    complete source range. **CANCEL** or Escape dismisses the review and revokes
    its plan. Dismissing the dialog never starts a write.
 
+Public screenshots use synthetic demo files and generic temporary paths; personal directories are excluded.
+
 ![Compact main dialog](gui-smoke.png)
 ![Read-only confirmation](gui-plan-smoke.png)
 

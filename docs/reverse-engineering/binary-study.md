@@ -12,7 +12,7 @@ Official publisher repository: https://github.com/pbatard/rufus. Release v4.15, 
 
 GitHub publisher digest matching establishes integrity relative to that HTTPS release channel, not an independent Authenticode certificate-chain verification. Authenticode trust was not checked. UPX ran only as an unpacking tool; Rufus was never executed. Research artifacts/tools stay under ignored `references/`, outside distributed application/source archives.
 
-REA `binary_session` confirmed server 6.5.0, Ghidra 12.1.4 at the supplied `<home>/AI/REA/ghidra/`, its native Linux x86_64 decompiler, and Java 21.0.12.1. No Ghidra/Codex installation or configuration was modified. Both artifacts were opened explicitly with `provider_id: ghidra`; each session was closed after evidence export.
+REA `binary_session` confirmed server 6.5.0, Ghidra 12.1.4 at the supplied `<ghidra-install>/`, its native Linux x86_64 decompiler, and Java 21.0.12.1. No Ghidra/Codex installation or configuration was modified. Both artifacts were opened explicitly with `provider_id: ghidra`; each session was closed after evidence export.
 
 ## Packed versus unpacked coverage
 

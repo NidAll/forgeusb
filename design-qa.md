@@ -88,4 +88,6 @@ Implementation checklist: compact light default; real SELECT; fixed Status and
 START/CLOSE; truthful read-only fields; modal exact confirmation; retained safety
 engine; inspected combined reference/implementation captures.
 
+Privacy follow-up: published UI captures were replaced with fresh captures using synthetic files and generic temporary paths. All published documentation PNGs passed a personal-path OCR/metadata check. Historical live counts remain observations from their original tests, not properties of the replacement illustration.
+
 final result: passed

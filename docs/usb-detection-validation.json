@@ -38,7 +38,7 @@
   "gui_smoke": {
     "ok": true,
     "binary": "/usr/bin/forgeusb-gui",
-    "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+    "source": "<project>/test-output/bios-source.img",
     "exit_code": 0,
     "target_created": false,
     "private_display": ":99",
@@ -48,11 +48,11 @@
     "small_window": false,
     "advanced_properties": false,
     "screenshots": [
-      "<home>/Projects/forgeusb/test-output/usb-detection-gui/gui-main.png"
+      "<project>/test-output/usb-detection-gui/gui-main.png"
     ],
     "preview_visual_review_required": false,
     "elapsed_seconds": 10.05,
-    "log": "<home>/Projects/forgeusb/test-output/usb-detection-gui/gui.log"
+    "log": "<project>/test-output/usb-detection-gui/gui.log"
   },
   "screenshot_review": {
     "usb_device_count": 1,
@@ -62,5 +62,6 @@
   },
   "physical_writes": 0,
   "loop_devices": 0,
-  "root_gui": false
+  "root_gui": false,
+  "privacy_note": "Personal filesystem prefixes are replaced with placeholders. Artifact hashes and analysis addresses are unchanged."
 }

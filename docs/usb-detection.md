@@ -42,4 +42,6 @@ Validation outcomes and installed binary hashes are in
 [usb-detection-validation.json](usb-detection-validation.json). Live hardware
 checks are read-only enumeration and planning, not physical write/boot tests.
 
-![Installed GUI sees one USB, with no automatic selection](usb-detection.png)
+The published illustration below was recaptured with synthetic demo files for privacy. It does not reproduce the earlier live-device count.
+
+![Documentation capture using a synthetic demo image, with no target selected](usb-detection.png)

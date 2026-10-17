@@ -21,8 +21,8 @@
   "gui_smoke": {
     "normal_device_mode": {
       "ok": true,
-      "binary": "<home>/Projects/forgeusb/target/release/forgeusb-gui",
-      "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+      "binary": "<project>/target/release/forgeusb-gui",
+      "source": "<project>/test-output/bios-source.img",
       "exit_code": 0,
       "target_created": false,
       "private_display": ":99",
@@ -38,8 +38,8 @@
     },
     "native_picker_and_review": {
       "ok": true,
-      "binary": "<home>/Projects/forgeusb/target/release/forgeusb-gui",
-      "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+      "binary": "<project>/target/release/forgeusb-gui",
+      "source": "<project>/test-output/bios-source.img",
       "exit_code": 0,
       "target_created": false,
       "private_display": ":99",
@@ -58,8 +58,8 @@
     },
     "minimum_size_advanced": {
       "ok": true,
-      "binary": "<home>/Projects/forgeusb/target/release/forgeusb-gui",
-      "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+      "binary": "<project>/target/release/forgeusb-gui",
+      "source": "<project>/test-output/bios-source.img",
       "exit_code": 0,
       "target_created": false,
       "private_display": ":100",
@@ -77,8 +77,8 @@
     },
     "ci_blank_fixture": {
       "ok": true,
-      "binary": "<home>/Projects/forgeusb/target/release/forgeusb-gui",
-      "source": "<home>/Projects/forgeusb/test-output/ui-rework/ci-blank.img",
+      "binary": "<project>/target/release/forgeusb-gui",
+      "source": "<project>/test-output/ui-rework/ci-blank.img",
       "exit_code": 0,
       "target_created": false,
       "private_display": ":99",
@@ -90,7 +90,7 @@
       "screenshots": [],
       "preview_visual_review_required": false,
       "elapsed_seconds": 10.04,
-      "log": "<home>/Projects/forgeusb/test-output/ui-rework/ci-blank/gui.log"
+      "log": "<project>/test-output/ui-rework/ci-blank/gui.log"
     }
   },
   "owned_file_gui_write": {
@@ -114,5 +114,6 @@
     "ordinary_user": true,
     "started_with_no_source_or_target": true
   },
-  "subsequent_validation": "installation-validation.json"
+  "subsequent_validation": "installation-validation.json",
+  "privacy_note": "Personal filesystem prefixes are replaced with placeholders. Artifact hashes and analysis addresses are unchanged."
 }

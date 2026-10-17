@@ -6,11 +6,11 @@ A native Linux boot-media writer in Rust, with an Iced desktop app and a shared 
 
 ## Screenshots
 
-Compact desktop interface with one detected USB device. No target is automatically selected.
+Compact desktop interface using a synthetic demo image. No target is selected.
 
-![ForgeUSB main window showing one detected USB device, READY status and no selected target](docs/usb-detection.png)
+![ForgeUSB main window with a synthetic demo image, READY status and no selected target](docs/usb-detection.png)
 
-Read-only operation review in disposable-file mode. Writing remains disabled until the exact confirmation is entered; this capture did not start a write.
+Read-only operation review using synthetic demo paths in disposable-file mode. Writing remains disabled until the exact confirmation is entered; this capture did not start a write.
 
 ![ForgeUSB confirmation dialog showing a source image, new disposable output file, byte counts and required confirmation](docs/gui-plan-smoke.png)
 
