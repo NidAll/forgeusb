@@ -4,6 +4,16 @@ A native Linux boot-media writer in Rust, with an Iced desktop app and a shared 
 
 **Physical writes erase the selected USB. No physical disk was overwritten during development.** Never run the GUI as root. Physical writes require a separately installed Polkit helper, an eligible unmounted USB with a stable identity, a reviewed plan, and exact typed confirmation. No device is automatically selected. Desktop admission is preliminary; the root helper must repeat authoritative system-wide checks before any physical write. The device layer rejects host/system storage, mounted partitions, active swap, device-mapper/RAID holders, uncertain backing topology and non-512-byte logical sectors.
 
+## Screenshots
+
+Compact desktop interface with one detected USB device. No target is automatically selected.
+
+![ForgeUSB main window showing one detected USB device, READY status and no selected target](docs/usb-detection.png)
+
+Read-only operation review in disposable-file mode. Writing remains disabled until the exact confirmation is entered; this capture did not start a write.
+
+![ForgeUSB confirmation dialog showing a source image, new disposable output file, byte counts and required confirmation](docs/gui-plan-smoke.png)
+
 ## Build and run
 
 Rust stable >=1.88 and a C linker are required. On Arch/CachyOS install build prerequisites through your normal package manager; see [installation](docs/installation.md). The desktop uses Wayland or X11 and a software renderer.
