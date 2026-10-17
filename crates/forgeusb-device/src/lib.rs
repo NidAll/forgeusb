@@ -251,13 +251,25 @@ fn text(path: &Path) -> Result<String> {
 }
 
 fn optional_text(path: &Path) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
+    optional_text_value(path, fs::read_to_string(path))
+}
+
+fn optional_text_value(path: &Path, value: std::io::Result<String>) -> Result<Option<String>> {
+    match value {
         Ok(value) => {
             ensure!(value.len() <= 64 * 1024, "oversized identity attribute");
             let value = value.trim().to_owned();
             Ok((!value.is_empty()).then_some(value))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        // SCSI serial/WWID sysfs attributes can exist but return ENXIO when
+        // their optional VPD data is unavailable. This is not a topology error.
+        // Required geometry/graph attributes still use text() and fail closed.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ENXIO) =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
     }
 }
@@ -961,6 +973,47 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_optional_scsi_vpd_is_not_a_topology_failure() {
+        for attribute in ["device/serial", "device/wwid"] {
+            let value = optional_text_value(
+                Path::new(attribute),
+                Err(std::io::Error::from_raw_os_error(libc::ENXIO)),
+            )
+            .unwrap();
+            assert!(value.is_none());
+        }
+        assert_eq!(
+            optional_text_value(Path::new("serial"), Ok("  USB-123\n".into())).unwrap(),
+            Some("USB-123".into())
+        );
+        assert_eq!(
+            optional_text_value(Path::new("serial"), Ok(" \n".into())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn unexpected_optional_identity_errors_still_fail_closed() {
+        for code in [libc::EACCES, libc::EIO, libc::ENODEV, libc::EINVAL] {
+            let error = optional_text_value(
+                Path::new("device/serial"),
+                Err(std::io::Error::from_raw_os_error(code)),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("device/serial"));
+        }
+        assert!(optional_text_value(Path::new("serial"), Ok("x".repeat(65_537))).is_err());
+        let directory = tempfile::tempdir().unwrap();
+        // Absence is optional, but required geometry is never optional.
+        assert!(
+            optional_text(&directory.path().join("missing"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(text(&directory.path().join("missing")).is_err());
+    }
+
+    #[test]
     fn usb_without_serial_never_inherits_host_hub_identity() {
         let dir = tempfile::tempdir().unwrap();
         let hub = dir.path().join("hub");
@@ -976,8 +1029,13 @@ mod tests {
         fs::write(device.join("idVendor"), "1234").unwrap();
         assert_eq!(usb_identity(&block, None).unwrap(), (true, None));
         fs::write(device.join("serial"), "ACTUAL-USB-STICK").unwrap();
+        let unavailable_scsi_serial = optional_text_value(
+            Path::new("device/serial"),
+            Err(std::io::Error::from_raw_os_error(libc::ENXIO)),
+        )
+        .unwrap();
         assert_eq!(
-            usb_identity(&block, None).unwrap(),
+            usb_identity(&block, unavailable_scsi_serial).unwrap(),
             (true, Some("ACTUAL-USB-STICK".into()))
         );
         assert_eq!(

@@ -26,3 +26,7 @@ Remaining: installed Polkit/physical-device acceptance with exact user authoriza
 Connected the original icon to the real X11 window, matching Wayland application ID and desktop launcher, and added seven theme PNG sizes. Added a normal-user installer with narrowly separated authenticated system copy, user/staging modes, receipts and guarded uninstall. CI now tests staging/removal without elevation. The requested system installation succeeded on CachyOS and the installed GUI was opened as the normal user.
 
 Validation: formatting, strict Clippy, 44 tests and release build passed. Installer staging/refusal/removal, actual X11 window icon/class, 17 installed file hashes/permissions, Polkit registration, installed CLI file integration and installed GUI native selection/preview passed. Physical writes remain untested and require exact target authorization. Other distribution recipes remain untested.
+
+## USB discovery regression follow-up (2026-10-17)
+
+Fixed ENXIO from unavailable optional SCSI VPD identity attributes, preserving nearest-USB serial fallback and all required topology/admission checks. Successful GUI refresh now clears its discovery error independently and never restores stale confirmation. Added four regression tests; 48 total tests, format, Clippy and release build passed. Corrected build installed and validated against the user's Kingston USB using read-only enumeration/planning and GUI display only; no physical writes. See usb-detection.md.

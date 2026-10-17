@@ -1,0 +1,66 @@
+{
+  "date": "2026-10-17",
+  "scope": "optional SCSI VPD discovery regression and GUI recovery",
+  "quality_gates": {
+    "fmt": "passed",
+    "clippy_workspace_all_targets_deny_warnings": "passed",
+    "workspace_tests": 48,
+    "locked_release_build": "passed"
+  },
+  "observed_before": {
+    "scsi_serial_errno": "ENXIO",
+    "scsi_wwid_errno": "ENXIO",
+    "usb_device_serial_readable": true,
+    "discovery_failed": true
+  },
+  "observed_after": {
+    "path": "/dev/sda",
+    "model": "DataTraveler 3.0",
+    "capacity": 61872793600,
+    "transport": "usb",
+    "eligible": true,
+    "reasons": []
+  },
+  "internal_disks_remain_ineligible": true,
+  "readonly_plan": {
+    "target": "/dev/sda",
+    "capacity": 61872793600,
+    "source_bytes": 1048576,
+    "confirmation_submitted": false,
+    "write_started": false
+  },
+  "installed_hashes_verified": true,
+  "binary_sha256": {
+    "forgeusb": "ea1f7c231ab19fa10859b5975ee7286bd421215d2569e4725f70a6b74ce93fe2",
+    "forgeusb-gui": "aad5f79b20b0039f3c019af9021af2ec4c3c91b59955a9f81d3b693bac82555e"
+  },
+  "helper_sha256": "1c20af63a4022a17f3a6802d3748a70b330b7c841e3dcd38cc9fc60d416d13f9",
+  "gui_smoke": {
+    "ok": true,
+    "binary": "/usr/bin/forgeusb-gui",
+    "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+    "exit_code": 0,
+    "target_created": false,
+    "private_display": ":99",
+    "preview_shortcut_sent": false,
+    "native_file_chooser_exercised": false,
+    "normal_device_mode": true,
+    "small_window": false,
+    "advanced_properties": false,
+    "screenshots": [
+      "<home>/Projects/forgeusb/test-output/usb-detection-gui/gui-main.png"
+    ],
+    "preview_visual_review_required": false,
+    "elapsed_seconds": 10.05,
+    "log": "<home>/Projects/forgeusb/test-output/usb-detection-gui/gui.log"
+  },
+  "screenshot_review": {
+    "usb_device_count": 1,
+    "status": "READY",
+    "device_selected": false,
+    "error_visible": false
+  },
+  "physical_writes": 0,
+  "loop_devices": 0,
+  "root_gui": false
+}

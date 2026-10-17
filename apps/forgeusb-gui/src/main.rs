@@ -169,6 +169,7 @@ struct State {
     picking: bool,
     picker_cancel: Cancellation,
     error: Option<String>,
+    discovery_error: Option<String>,
     status: String,
     log: VecDeque<String>,
     tx: SyncSender<WorkerEvent>,
@@ -214,6 +215,7 @@ impl State {
             picking: false,
             picker_cancel: Cancellation::default(),
             error: None,
+            discovery_error: None,
             status: "Ready.".into(),
             log: VecDeque::new(),
             tx,
@@ -233,11 +235,15 @@ impl State {
     }
 
     fn invalidate_plan(&mut self) {
+        self.clear_review();
+        self.error = None;
+    }
+
+    fn clear_review(&mut self) {
         self.plan = None;
         self.confirm_open = false;
         self.focus_preview = false;
         self.confirmation.clear();
-        self.error = None;
     }
 
     fn refresh(&mut self) {
@@ -459,6 +465,7 @@ impl State {
                 self.discovering = false;
                 match result {
                     Ok(devices) => {
+                        self.discovery_error = None;
                         self.choices = devices
                             .iter()
                             .filter(|d| d.eligible)
@@ -496,12 +503,12 @@ impl State {
                         self.choices.clear();
                         if self.running.is_none() && !self.test_mode {
                             self.selected = None;
-                            self.invalidate_plan();
+                            self.clear_review();
                         }
-                        if self.error.as_ref() != Some(&error) {
+                        if self.discovery_error.as_ref() != Some(&error) {
                             self.append_log(format!("Device discovery failed: {error}"));
                         }
-                        self.error = Some(error);
+                        self.discovery_error = Some(error);
                     }
                 }
             }
@@ -931,7 +938,7 @@ impl State {
         {
             content = content.push(text("This image cannot be written in DD mode. Select an ISOHybrid or a disk image. ISO extraction is not available yet.").size(12).style(text::danger));
         }
-        if let Some(error) = &self.error {
+        if let Some(error) = self.error.as_ref().or(self.discovery_error.as_ref()) {
             content = content.push(
                 text(error.chars().take(600).collect::<String>())
                     .size(12)
@@ -964,7 +971,7 @@ impl State {
             "ANALYZING IMAGE".into()
         } else if self.planning {
             "PREPARING OPERATION".into()
-        } else if self.error.is_some() {
+        } else if self.error.is_some() || self.discovery_error.is_some() {
             "ERROR".into()
         } else if self.status.starts_with("Verified ") {
             "DONE".into()
@@ -1034,7 +1041,9 @@ impl State {
         ]
         .spacing(8)
         .align_y(iced::Center);
-        let bottom = if self.running.is_some()
+        let bottom = if self.discovery_error.is_some() && self.error.is_none() && self.idle() {
+            "Device discovery failed — reconnect or refresh".into()
+        } else if self.running.is_some()
             || self.planning
             || self.inspecting
             || self.error.is_some()
@@ -1688,6 +1697,40 @@ mod tests {
             target_kind: TargetKind::TestFile,
             strategy: "raw_image_with_full_readback".into(),
         }
+    }
+
+    #[test]
+    fn successful_discovery_clears_only_the_discovery_error() {
+        let mut state = State::empty(Options::default());
+        state.error = Some("Earlier operation failed".into());
+        state.worker_event(WorkerEvent::Devices(Err("Transient sysfs failure".into())));
+        assert!(state.discovery_error.is_some());
+        assert!(state.choices.is_empty());
+        state.worker_event(WorkerEvent::Devices(Ok(vec![device()])));
+        assert!(state.discovery_error.is_none());
+        assert_eq!(state.error.as_deref(), Some("Earlier operation failed"));
+        assert_eq!(state.choices.len(), 1);
+        assert!(state.selected.is_none());
+    }
+
+    #[test]
+    fn discovery_failure_revokes_physical_selection_and_review() {
+        let mut state = State::empty(Options::default());
+        state.worker_event(WorkerEvent::Devices(Ok(vec![device()])));
+        state.selected = Some(state.choices[0].clone());
+        state.plan = Some(plan());
+        state.confirm_open = true;
+        state.confirmation = "stale approval".into();
+        state.worker_event(WorkerEvent::Devices(Err("Transient sysfs failure".into())));
+        assert!(state.selected.is_none());
+        assert!(state.plan.is_none());
+        assert!(!state.confirm_open);
+        assert!(state.confirmation.is_empty());
+        assert!(!state.can_start());
+        state.worker_event(WorkerEvent::Devices(Ok(vec![device()])));
+        assert!(state.discovery_error.is_none());
+        assert!(state.selected.is_none());
+        assert!(!state.can_start());
     }
 
     #[test]
