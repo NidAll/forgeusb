@@ -9,8 +9,9 @@ output=$(cd -- "$output" && pwd -P)
 # Stable ordering/ownership/mtime make identical saved source trees reproducible.
 epoch=${SOURCE_DATE_EPOCH:-0}
 tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
+    --exclude=__pycache__ --exclude='*.pyc' \
     --transform="s,^,forgeusb-$version/," -C "$root" \
-    -cf - Cargo.toml Cargo.lock .cargo LICENSE THIRD_PARTY_NOTICES.md README.md crates apps tests docs packaging \
+    -cf - Cargo.toml Cargo.lock .cargo LICENSE THIRD_PARTY_NOTICES.md README.md design-qa.md crates apps tests docs packaging \
     | gzip -n > "$output/forgeusb-$version.tar.gz"
 digest=$(sha256sum -- "$output/forgeusb-$version.tar.gz")
 digest=${digest%% *}
