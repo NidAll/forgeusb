@@ -38,7 +38,7 @@ To exercise the complete write/verify path without USB hardware, choose a **new*
 ./target/release/forgeusb verify /absolute/path/disk.img --device /absolute/path/NEW-test-copy.img --test-file
 ```
 
-Disposable-file mode never overwrites an existing file. The GUI exposes the same mode and engine. Ctrl+O focuses the image path, Ctrl+P previews, F8 starts only after exact confirmation, and Esc cancels. See [GUI details](docs/gui.md).
+Disposable-file mode never overwrites an existing file. The compact Rufus-style GUI exposes the same mode under advanced drive properties. SELECT or Ctrl+O opens a native file chooser; START or Ctrl+P opens the read-only review. Writing requires exact typed confirmation in that dialog. Esc dismisses or cancels. See [GUI details](docs/gui.md).
 
 `--json` emits a JSON document for read-only queries and newline-delimited progress/completion events for write/verify. Errors are JSON on stderr. Exit status: 0 success; 1 operation/safety/dependency failure; 2 invalid CLI syntax. Ctrl+C requests cancellation and currently returns operation failure (1). A partial write is not rolled back. Cancellation takes effect between I/O chunks and cannot interrupt a kernel I/O call already blocked.
 
@@ -67,6 +67,8 @@ All destructive integration fixtures are newly owned ordinary files. Loop/physic
 Rufus v4.15 source and its matching official executable were investigated using REA 6.5.0 and Ghidra 12.1.4. [Research index](docs/reverse-engineering/README.md) links source architecture, diagrams, function mappings, binary evidence and limitations. Development references remain local under `references/` and are excluded from packages. [Dependency decisions](docs/dependencies.md), [license inventory](docs/dependency-licenses.json) and [third-party notices](THIRD_PARTY_NOTICES.md) document the supply chain.
 
 ## Packaging
+
+Run `bash packaging/install.sh --system` as your desktop user to build and install with administrator authentication for the final copy. The application menu launcher and window include the ForgeUSB icon. `--user` installs desktop/CLI only; `--stage /tmp/forgeusb-NEW-stage --no-build` prepares a new disposable staging tree. See [installation and removal](docs/installation.md).
 
 `make -f packaging/Makefile install DESTDIR=/tmp/forgeusb-stage` stages binaries, desktop entry, original icon, license texts and Polkit policy without privileged installation. A real `/usr` installation is a separate administrator step. `bash packaging/make-source-archive.sh` creates a deterministic source archive and an Arch PKGBUILD with the exact checksum. Debian/RPM recipes are starting points and have not been built in clean distribution containers. `bash packaging/make-portable.sh` builds a local portable directory archive for this host's glibc. A portable directory can run the GUI/CLI; physical writes still require the trusted system helper/policy. No online updates or telemetry are implemented.
 

@@ -13,6 +13,8 @@ Requires:       polkit
 Requires:       libxkbcommon
 Requires:       fontconfig
 Suggests:       wimlib-utils
+Suggests:       kdialog
+Suggests:       zenity
 
 %description
 Inspect, plan, write and verify raw images with explicit target confirmation.
@@ -37,5 +39,6 @@ make -f packaging/Makefile install DESTDIR=%{buildroot}
 /usr/lib/forgeusb/forgeusb-helper
 %{_datadir}/applications/forgeusb.desktop
 %{_datadir}/icons/hicolor/scalable/apps/forgeusb.svg
+%{_datadir}/icons/hicolor/*x*/apps/forgeusb.png
 %{_datadir}/polkit-1/actions/io.forgeusb.write.policy
 /usr/share/licenses/forgeusb

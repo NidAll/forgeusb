@@ -1,0 +1,118 @@
+{
+  "date": "2026-10-17",
+  "scope": "compact native GUI rework before icon integration",
+  "physical_writes": 0,
+  "loop_devices": 0,
+  "privileged_installations": 0,
+  "quality_gates": {
+    "fmt": "passed",
+    "clippy_workspace_all_targets_deny_warnings": "passed",
+    "workspace_tests": {
+      "passed": 44,
+      "failed": 0
+    },
+    "release_workspace_build": "passed"
+  },
+  "binaries": {
+    "forgeusb": "23a87451fafdeafcdc2181bfa3728ace6693ecdeab1031b99740eaff6c26e556",
+    "forgeusb-gui": "b9491d8c8dba70dfb6ebb6725184ac802b766eced444fd8a39090f544273620f",
+    "forgeusb-helper": "95b22bad932e03a1409071c4d8225f67d78f66065f73bd581ebba8c6111511af"
+  },
+  "gui_smoke": {
+    "normal_device_mode": {
+      "ok": true,
+      "binary": "<home>/Projects/forgeusb/target/release/forgeusb-gui",
+      "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+      "exit_code": 0,
+      "target_created": false,
+      "private_display": ":99",
+      "preview_shortcut_sent": false,
+      "native_file_chooser_exercised": false,
+      "normal_device_mode": true,
+      "screenshots": [
+        "/tmp/forgeusb-classic-release-device/gui-main.png"
+      ],
+      "preview_visual_review_required": false,
+      "elapsed_seconds": 10.07,
+      "log": "/tmp/forgeusb-classic-release-device/gui.log"
+    },
+    "native_picker_and_review": {
+      "ok": true,
+      "binary": "<home>/Projects/forgeusb/target/release/forgeusb-gui",
+      "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+      "exit_code": 0,
+      "target_created": false,
+      "private_display": ":99",
+      "preview_shortcut_sent": true,
+      "native_file_chooser_exercised": true,
+      "normal_device_mode": false,
+      "small_window": false,
+      "advanced_properties": false,
+      "screenshots": [
+        "/tmp/forgeusb-classic-release-confirm/gui-main.png",
+        "/tmp/forgeusb-classic-release-confirm/gui-preview.png"
+      ],
+      "preview_visual_review_required": true,
+      "elapsed_seconds": 10.06,
+      "log": "/tmp/forgeusb-classic-release-confirm/gui.log"
+    },
+    "minimum_size_advanced": {
+      "ok": true,
+      "binary": "<home>/Projects/forgeusb/target/release/forgeusb-gui",
+      "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+      "exit_code": 0,
+      "target_created": false,
+      "private_display": ":100",
+      "preview_shortcut_sent": false,
+      "native_file_chooser_exercised": false,
+      "normal_device_mode": true,
+      "small_window": true,
+      "advanced_properties": true,
+      "screenshots": [
+        "/tmp/forgeusb-classic-release-small/gui-main.png"
+      ],
+      "preview_visual_review_required": false,
+      "elapsed_seconds": 10.03,
+      "log": "/tmp/forgeusb-classic-release-small/gui.log"
+    },
+    "ci_blank_fixture": {
+      "ok": true,
+      "binary": "<home>/Projects/forgeusb/target/release/forgeusb-gui",
+      "source": "<home>/Projects/forgeusb/test-output/ui-rework/ci-blank.img",
+      "exit_code": 0,
+      "target_created": false,
+      "private_display": ":99",
+      "preview_shortcut_sent": false,
+      "native_file_chooser_exercised": false,
+      "normal_device_mode": false,
+      "small_window": false,
+      "advanced_properties": false,
+      "screenshots": [],
+      "preview_visual_review_required": false,
+      "elapsed_seconds": 10.04,
+      "log": "<home>/Projects/forgeusb/test-output/ui-rework/ci-blank/gui.log"
+    }
+  },
+  "owned_file_gui_write": {
+    "ok": true,
+    "mode": "new owned ordinary file only",
+    "bytes": 4194304,
+    "sha256": "a11a3a6ddcbe9364ee08532b1d012fada77b803cf241f1a318484131ff24e08f",
+    "confirmation_entered": "CREATE /tmp/forgeusb-owned-gui-write-3nvqf9a_/new-output.img 4194304 bytes",
+    "physical_writes": 0,
+    "loop_devices": 0,
+    "external_readback_verified": true
+  },
+  "limitations": [
+    "Physical Polkit flow untested",
+    "GTK picker fallback untested",
+    "Linux font and window chrome differ from Windows",
+    "Raw DD strategy only; no new boot compatibility claim"
+  ],
+  "desktop_preview": {
+    "unit": "forgeusb-classic-preview.service",
+    "ordinary_user": true,
+    "started_with_no_source_or_target": true
+  },
+  "subsequent_validation": "installation-validation.json"
+}

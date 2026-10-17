@@ -29,10 +29,34 @@ fn main() -> iced::Result {
         std::process::exit(2);
     }
     let options = Options::parse();
-    iced::application("ForgeUSB · bootable media", State::update, State::view)
+    iced::application("ForgeUSB 0.1.0", State::update, State::view)
         .theme(State::theme)
         .subscription(State::subscription)
-        .window_size((980.0, 900.0))
+        .settings(iced::Settings {
+            default_text_size: 12.0.into(),
+            ..Default::default()
+        })
+        .default_font(Font {
+            family: iced::font::Family::Name("Noto Sans"),
+            ..Font::DEFAULT
+        })
+        .window(iced::window::Settings {
+            size: (475.0, 560.0).into(),
+            min_size: Some((440.0, 540.0).into()),
+            icon: Some(
+                iced::window::icon::from_rgba(
+                    include_bytes!("../assets/forgeusb-64.rgba").to_vec(),
+                    64,
+                    64,
+                )
+                .expect("checked-in 64x64 RGBA icon"),
+            ),
+            platform_specific: iced::window::settings::PlatformSpecific {
+                application_id: "forgeusb".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
         .exit_on_close_request(false)
         .run_with(move || (State::new(options), Task::none()))
 }
@@ -86,6 +110,7 @@ enum Message {
     Tick,
     Refresh,
     ImagePath(String),
+    BrowseImage,
     Inspect,
     ChooseDevice(DeviceChoice),
     TestMode(bool),
@@ -93,10 +118,13 @@ enum Message {
     MakePlan,
     Confirmation(String),
     Start,
+    StartRequested,
+    DismissPlan,
     Cancel,
     ToggleTheme,
     ToggleLog,
     ToggleAdvanced,
+    ToggleAdvancedFormat,
     FocusImage,
     FocusNext(bool),
     SelectRelative(i8),
@@ -105,6 +133,7 @@ enum Message {
 }
 
 enum WorkerEvent {
+    PickedImage(Result<Option<String>, String>),
     Devices(Result<Vec<Device>, String>),
     Inspected(Result<ImageInfo, String>),
     Planned(Result<Box<Plan>, String>),
@@ -135,6 +164,10 @@ struct State {
     dark: bool,
     show_log: bool,
     advanced: bool,
+    advanced_format: bool,
+    confirm_open: bool,
+    picking: bool,
+    picker_cancel: Cancellation,
     error: Option<String>,
     status: String,
     log: VecDeque<String>,
@@ -173,11 +206,15 @@ impl State {
             inspecting: false,
             planning: false,
             discovering: false,
-            dark: true,
+            dark: false,
             show_log: false,
             advanced: false,
+            advanced_format: false,
+            confirm_open: false,
+            picking: false,
+            picker_cancel: Cancellation::default(),
             error: None,
-            status: "Choose an image and a target to begin.".into(),
+            status: "Ready.".into(),
             log: VecDeque::new(),
             tx,
             rx,
@@ -197,6 +234,7 @@ impl State {
 
     fn invalidate_plan(&mut self) {
         self.plan = None;
+        self.confirm_open = false;
         self.focus_preview = false;
         self.confirmation.clear();
         self.error = None;
@@ -223,39 +261,59 @@ impl State {
                 }
                 if self.focus_preview {
                     self.focus_preview = false;
-                    return Task::batch([
-                        text_input::focus(text_input::Id::new("confirmation")),
-                        scrollable::snap_to(
-                            scrollable::Id::new("workflow"),
-                            scrollable::RelativeOffset::END,
-                        ),
-                    ]);
+                    return text_input::focus(text_input::Id::new("confirmation"));
                 }
                 self.ticks = self.ticks.wrapping_add(1);
                 if self.ticks.is_multiple_of(30) {
                     self.refresh();
                 }
-                if self.exit_after_operation && self.running.is_none() {
+                if self.exit_after_operation && self.running.is_none() && !self.picking {
                     return iced::exit();
                 }
                 if self
                     .smoke_started
                     .is_some_and(|start| start.elapsed() >= Duration::from_secs(10))
+                    && !self.exit_after_operation
                 {
+                    println!(
+                        "ForgeUSB GUI smoke state: {}",
+                        serde_json::json!({
+                            "image": self.image.as_ref().map(|image| &image.path),
+                            "plan_ready": self.plan.is_some(),
+                            "confirmation_open": self.confirm_open,
+                            "running": self.running.is_some(),
+                        })
+                    );
                     println!(
                         "ForgeUSB GUI smoke test: event loop ran, {} storage devices discovered; no write requested.",
                         self.devices.len()
                     );
-                    return iced::exit();
+                    return self.update(Message::CloseRequested);
                 }
             }
             Message::Refresh => self.refresh(),
-            Message::ImagePath(value) if self.idle() => {
+            Message::ImagePath(value) if self.idle() && !self.confirm_open && !self.show_log => {
                 self.image_path = value;
                 self.image = None;
                 self.invalidate_plan();
             }
-            Message::Inspect if self.idle() && !self.image_path.trim().is_empty() => {
+            Message::BrowseImage if self.idle() && !self.confirm_open && !self.show_log => {
+                self.invalidate_plan();
+                self.picking = true;
+                self.picker_cancel = Cancellation::default();
+                self.status = "Select an image.".into();
+                let cancel = self.picker_cancel.clone();
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(WorkerEvent::PickedImage(select_image(&cancel)));
+                });
+            }
+            Message::Inspect
+                if self.idle()
+                    && !self.confirm_open
+                    && !self.show_log
+                    && !self.image_path.trim().is_empty() =>
+            {
                 self.inspecting = true;
                 self.invalidate_plan();
                 self.status = "Analyzing image structure and calculating SHA-256…".into();
@@ -266,16 +324,16 @@ impl State {
                     let _ = tx.send(WorkerEvent::Inspected(result));
                 });
             }
-            Message::ChooseDevice(value) if self.idle() => {
+            Message::ChooseDevice(value) if self.idle() && !self.confirm_open && !self.show_log => {
                 self.selected = Some(value);
                 self.invalidate_plan();
             }
-            Message::TestMode(value) if self.idle() => {
+            Message::TestMode(value) if self.idle() && !self.confirm_open && !self.show_log => {
                 self.test_mode = value;
                 self.selected = None;
                 self.invalidate_plan();
             }
-            Message::TestPath(value) if self.idle() => {
+            Message::TestPath(value) if self.idle() && !self.confirm_open && !self.show_log => {
                 self.test_path = value;
                 self.invalidate_plan();
             }
@@ -295,6 +353,17 @@ impl State {
                 });
             }
             Message::Confirmation(value) if self.running.is_none() => self.confirmation = value,
+            Message::StartRequested => {
+                return self.update(if self.confirm_open {
+                    Message::Start
+                } else {
+                    Message::MakePlan
+                });
+            }
+            Message::DismissPlan if self.running.is_none() => {
+                self.invalidate_plan();
+                self.status = "Operation cancelled before writing.".into();
+            }
             Message::Start if self.can_start() => self.start(),
             Message::Cancel => {
                 if let Some(running) = &self.running {
@@ -305,12 +374,19 @@ impl State {
                     self.append_log(
                         "Cancellation requested; the target may contain an incomplete image.",
                     );
+                } else if self.picking {
+                    self.picker_cancel.cancel();
+                } else if self.confirm_open {
+                    return self.update(Message::DismissPlan);
+                } else if self.show_log {
+                    self.show_log = false;
                 }
             }
             Message::ToggleTheme => self.dark = !self.dark,
-            Message::ToggleLog => self.show_log = !self.show_log,
+            Message::ToggleLog if !self.confirm_open => self.show_log = !self.show_log,
             Message::ToggleAdvanced => self.advanced = !self.advanced,
-            Message::FocusImage => return text_input::focus(text_input::Id::new("source-image")),
+            Message::ToggleAdvancedFormat => self.advanced_format = !self.advanced_format,
+            Message::FocusImage => return self.update(Message::BrowseImage),
             Message::FocusNext(backward) => {
                 return if backward {
                     iced::widget::focus_previous()
@@ -319,7 +395,11 @@ impl State {
                 };
             }
             Message::SelectRelative(direction)
-                if self.idle() && !self.test_mode && !self.choices.is_empty() =>
+                if self.idle()
+                    && !self.confirm_open
+                    && !self.show_log
+                    && !self.test_mode
+                    && !self.choices.is_empty() =>
             {
                 let current = self
                     .selected
@@ -336,11 +416,14 @@ impl State {
                 self.selected = Some(self.choices[index].clone());
                 self.invalidate_plan();
             }
-            Message::ToggleTestMode if self.idle() => {
+            Message::ToggleTestMode if self.idle() && !self.confirm_open && !self.show_log => {
                 return self.update(Message::TestMode(!self.test_mode));
             }
             Message::CloseRequested => {
-                if let Some(running) = &self.running {
+                if self.picking {
+                    self.picker_cancel.cancel();
+                    self.exit_after_operation = true;
+                } else if let Some(running) = &self.running {
                     running.cancel.cancel();
                     self.exit_after_operation = true;
                     self.status =
@@ -357,6 +440,21 @@ impl State {
 
     fn worker_event(&mut self, event: WorkerEvent) {
         match event {
+            WorkerEvent::PickedImage(result) => {
+                self.picking = false;
+                if self.exit_after_operation {
+                    return;
+                }
+                match result {
+                    Ok(Some(path)) => {
+                        self.image_path = path;
+                        self.image = None;
+                        let _ = self.update(Message::Inspect);
+                    }
+                    Ok(None) => self.status = "Ready.".into(),
+                    Err(error) => self.fail(error),
+                }
+            }
             WorkerEvent::Devices(result) => {
                 self.discovering = false;
                 match result {
@@ -367,9 +465,9 @@ impl State {
                             .map(|d| DeviceChoice {
                                 path: d.path.clone(),
                                 label: format!(
-                                    "{} · {} · {}",
+                                    "{} ({}) [{}]",
+                                    ellipsize(&d.model, 28),
                                     d.path.display(),
-                                    d.model,
                                     size(d.capacity)
                                 ),
                             })
@@ -411,8 +509,7 @@ impl State {
                 self.inspecting = false;
                 match result {
                     Ok(image) => {
-                        self.status =
-                            "Image analyzed. Preview the operation before writing.".into();
+                        self.status = "Image analyzed. Press START to review the operation.".into();
                         self.append_log(format!(
                             "Analyzed {} ({}); SHA-256 {}",
                             image.path.display(),
@@ -453,8 +550,10 @@ impl State {
                             plan.image.size
                         ));
                         self.status =
-                            "Review the exact plan, then type the confirmation below.".into();
+                            "Review the operation and confirm the selected target.".into();
                         self.plan = Some(*plan);
+                        self.confirm_open = true;
+                        self.show_log = false;
                         self.focus_preview = true;
                     }
                     Err(error) => self.fail(error),
@@ -472,6 +571,7 @@ impl State {
             }
             WorkerEvent::Finished(result) => {
                 self.running = None;
+                self.confirm_open = false;
                 self.plan = None;
                 self.confirmation.clear();
                 match result {
@@ -493,7 +593,7 @@ impl State {
     }
 
     fn idle(&self) -> bool {
-        self.running.is_none() && !self.inspecting && !self.planning
+        self.running.is_none() && !self.inspecting && !self.planning && !self.picking
     }
 
     fn target(&self) -> Option<PathBuf> {
@@ -505,11 +605,18 @@ impl State {
     }
 
     fn can_plan(&self) -> bool {
-        self.idle() && !self.image_path.trim().is_empty() && self.target().is_some()
+        self.idle()
+            && !self.confirm_open
+            && !self.show_log
+            && !self.image_path.trim().is_empty()
+            && self.image.as_ref().is_none_or(|image| image.bootable_disk)
+            && self.target().is_some()
     }
 
     fn can_start(&self) -> bool {
         self.idle()
+            && self.confirm_open
+            && !self.show_log
             && self.smoke_started.is_none()
             && self
                 .plan
@@ -520,6 +627,7 @@ impl State {
     fn start(&mut self) {
         let plan = self.plan.clone().expect("can_start requires a plan");
         let confirmation = self.confirmation.clone();
+        self.confirm_open = false;
         let cancel = Cancellation::default();
         self.running = Some(Running {
             cancel: cancel.clone(),
@@ -562,22 +670,22 @@ impl State {
 
     fn theme(&self) -> Theme {
         Theme::custom(
-            "ForgeUSB".into(),
+            "ForgeUSB classic".into(),
             if self.dark {
                 iced::theme::Palette {
-                    background: Color::from_rgb8(18, 22, 29),
-                    text: Color::from_rgb8(231, 235, 241),
-                    primary: Color::from_rgb8(100, 219, 184),
-                    success: Color::from_rgb8(100, 219, 184),
-                    danger: Color::from_rgb8(255, 127, 117),
+                    background: Color::from_rgb8(38, 38, 38),
+                    text: Color::from_rgb8(238, 238, 238),
+                    primary: Color::from_rgb8(78, 151, 218),
+                    success: Color::from_rgb8(6, 176, 37),
+                    danger: Color::from_rgb8(235, 115, 110),
                 }
             } else {
                 iced::theme::Palette {
-                    background: Color::from_rgb8(242, 245, 248),
-                    text: Color::from_rgb8(28, 39, 47),
-                    primary: Color::from_rgb8(15, 115, 94),
-                    success: Color::from_rgb8(15, 115, 94),
-                    danger: Color::from_rgb8(173, 45, 42),
+                    background: Color::from_rgb8(240, 240, 240),
+                    text: Color::from_rgb8(0, 0, 0),
+                    primary: Color::from_rgb8(0, 102, 204),
+                    success: Color::from_rgb8(6, 176, 37),
+                    danger: Color::from_rgb8(165, 28, 28),
                 }
             },
         )
@@ -603,154 +711,140 @@ impl State {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let header = row![
-            column![
-                text("FORGEUSB").size(30),
-                text("Bootable media, with every step in view.")
-                    .size(14)
-                    .style(text::secondary),
-            ]
-            .spacing(4)
-            .width(Fill),
-            button(if self.dark {
-                "Light theme"
-            } else {
-                "Dark theme"
-            })
-            .on_press(Message::ToggleTheme)
-            .style(button::secondary),
-        ]
-        .align_y(iced::Center);
-
-        let source_input = text_input("/home/you/Downloads/image.iso", &self.image_path)
-            .id(text_input::Id::new("source-image"))
-            .padding(12)
-            .size(15)
-            .on_submit(Message::Inspect);
-        let source_input = if self.idle() {
-            source_input.on_input(Message::ImagePath)
-        } else {
-            source_input
-        };
-        let mut source = column![
-            section_title("01", "Source image"),
-            row![
-                source_input,
-                button(if self.inspecting {
-                    "Analyzing…"
-                } else {
-                    "Analyze image"
-                })
-                .padding(12)
-                .on_press_maybe(
-                    (self.idle() && !self.image_path.trim().is_empty()).then_some(Message::Inspect)
-                ),
-            ]
-            .spacing(10),
-        ]
-        .spacing(12);
-        if let Some(image) = &self.image {
-            source = source.push(
-                row![
-                    badge(format!("{:?}", image.kind)),
-                    badge(size(image.size)),
-                    badge(if image.bootable_disk {
-                        "Disk layout detected"
-                    } else {
-                        "Boot compatibility requires review"
-                    }),
-                ]
-                .spacing(10),
-            );
-            source = source.push(
-                text(format!("SHA-256  {}", image.sha256))
-                    .font(Font::MONOSPACE)
-                    .size(11),
-            );
-            for warning in &image.warnings {
-                source = source.push(text(warning).size(13).style(text::danger));
-            }
-        } else {
-            source = source.push(
-                text("ISO, hybrid ISO and raw disk images · structural inspection + SHA-256")
-                    .size(13)
-                    .style(text::secondary),
-            );
-        }
-
-        let mut target = column![
-            row![
-                section_title("02", "Destination").width(Fill),
-                button(if self.discovering {
-                    "Refreshing…"
-                } else {
-                    "Refresh devices"
-                })
-                .on_press_maybe((!self.discovering).then_some(Message::Refresh))
-                .style(button::secondary),
-            ]
-            .align_y(iced::Center),
-        ]
-        .spacing(12);
-        if self.test_mode {
-            let input = text_input("/home/you/usb-test.img (must not exist)", &self.test_path)
-                .padding(12)
+        let editable = self.idle() && !self.confirm_open && !self.show_log;
+        let mut drive = column![section_title("Drive Properties")].spacing(6);
+        let target: Element<'_, Message> = if self.test_mode {
+            let input = text_input("New output file (must not exist)", &self.test_path)
+                .size(12)
+                .padding([2, 5])
+                .style(classic_input)
                 .on_submit(Message::MakePlan);
-            target = target.push(if self.idle() {
-                input.on_input(Message::TestPath)
+            if editable {
+                input.on_input(Message::TestPath).into()
             } else {
-                input
-            });
-            target = target.push(
-                text("Disposable file mode creates a new file. Existing paths are refused.")
-                    .size(13)
-                    .style(text::secondary),
-            );
-        } else {
-            let selector = pick_list(
+                input.into()
+            }
+        } else if editable {
+            pick_list(
                 self.choices.clone(),
                 self.selected.clone(),
                 Message::ChooseDevice,
             )
-            .placeholder("Select a USB device — nothing is selected automatically")
-            .padding(12)
-            .width(Fill);
-            target = if self.idle() {
-                target.push(selector)
+            .placeholder(if self.choices.is_empty() {
+                "No USB devices found"
             } else {
-                target.push(
-                    text(
-                        self.selected
-                            .as_ref()
-                            .map(ToString::to_string)
-                            .unwrap_or_else(|| "No device selected".into()),
-                    )
-                    .size(14),
-                )
-            };
-            if self.choices.is_empty() {
-                target = target.push(text("No eligible USB devices found. Connect an unmounted USB drive or use disposable file mode.").size(13).style(text::secondary));
-            }
-            for device in self.devices.iter().filter(|d| !d.eligible) {
-                target = target.push(
-                    text(format!(
-                        "Protected · {} · {} · {}",
-                        device.path.display(),
-                        device.model,
-                        device.reasons.join("; ")
-                    ))
-                    .size(12)
-                    .style(text::secondary),
+                "Select a USB device"
+            })
+            .text_size(12)
+            .padding([2, 5])
+            .width(Fill)
+            .style(classic_pick_list)
+            .into()
+        } else {
+            readonly(
+                self.selected
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "No USB device selected".into()),
+            )
+        };
+        drive = drive.push(field(
+            if self.test_mode {
+                "Device (new image file)"
+            } else {
+                "Device"
+            },
+            target,
+        ));
+        let source = text_input("Disk or ISO image (please select)", &self.image_path)
+            .id(text_input::Id::new("source-image"))
+            .size(12)
+            .padding([2, 5])
+            .style(classic_input)
+            .on_submit(Message::Inspect);
+        let source = if editable {
+            source.on_input(Message::ImagePath)
+        } else {
+            source
+        };
+        drive = drive.push(field(
+            "Boot selection",
+            row![
+                source,
+                button(text("SELECT").size(12).center())
+                    .width(96)
+                    .padding([2, 8])
+                    .style(classic_button)
+                    .on_press_maybe(editable.then_some(Message::BrowseImage)),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        ));
+        drive = drive.push(field(
+            "Image option",
+            readonly(
+                if self
+                    .image
+                    .as_ref()
+                    .is_some_and(|image| !image.bootable_disk)
+                {
+                    "Unsupported image for DD mode"
+                } else {
+                    "Write in DD Image mode"
+                },
+            ),
+        ));
+        drive = drive.push(
+            row![
+                field("Partition scheme", readonly("From image")),
+                field("Target system", readonly("From image")),
+            ]
+            .spacing(36),
+        );
+        drive = drive.push(
+            button(
+                text(if self.advanced {
+                    "Hide advanced drive properties"
+                } else {
+                    "Show advanced drive properties"
+                })
+                .size(12),
+            )
+            .padding([1, 0])
+            .style(button::text)
+            .on_press_maybe(
+                (!self.confirm_open && !self.show_log).then_some(Message::ToggleAdvanced),
+            ),
+        );
+        if self.advanced {
+            let file_mode = checkbox("Use a disposable image file", self.test_mode)
+                .size(14)
+                .text_size(12);
+            drive = drive.push(if editable {
+                file_mode.on_toggle(Message::TestMode)
+            } else {
+                file_mode
+            });
+            if let Some(image) = &self.image {
+                drive = drive
+                    .push(text(format!("{:?} image, {}", image.kind, size(image.size))).size(11));
+                drive = drive.push(
+                    text(format!("SHA-256: {}", image.sha256))
+                        .size(10)
+                        .font(Font::MONOSPACE),
                 );
+                for warning in &image.warnings {
+                    drive = drive.push(text(warning).size(11).style(text::danger));
+                }
             }
-            if let Some(device) = self
-                .selected
-                .as_ref()
-                .and_then(|s| self.devices.iter().find(|d| d.path == s.path))
-            {
-                target = target.push(
+            if let Some(device) = self.selected.as_ref().and_then(|selected| {
+                self.devices
+                    .iter()
+                    .find(|device| device.path == selected.path)
+            }) {
+                drive = drive.push(
                     text(format!(
-                        "{} {} · {} bytes · {}:{} · serial {}",
+                        "{} {} — {} bytes\n{}:{}; serial {}",
                         device.vendor,
                         device.model,
                         device.capacity,
@@ -758,243 +852,616 @@ impl State {
                         device.identity.minor,
                         device.identity.serial.as_deref().unwrap_or("unavailable")
                     ))
-                    .size(12),
+                    .size(11),
                 );
                 for partition in &device.partitions {
-                    target = target.push(
+                    drive = drive.push(
                         text(format!(
-                            "{} · {} · {} · {}",
+                            "{}: {}, {}",
                             partition.path.display(),
-                            size(partition.capacity),
                             partition
                                 .filesystem
                                 .as_deref()
-                                .unwrap_or("filesystem unknown"),
+                                .unwrap_or("unknown filesystem"),
                             if partition.mounts.is_empty() {
                                 "unmounted".into()
                             } else {
                                 partition.mounts.join(", ")
                             }
                         ))
-                        .size(12)
-                        .style(text::secondary),
+                        .size(11),
                     );
                 }
             }
-        }
-        let test_checkbox = checkbox(
-            "Use a new disposable image file instead of a USB drive",
-            self.test_mode,
-        )
-        .size(16)
-        .text_size(13);
-        target = target.push(if self.idle() {
-            test_checkbox.on_toggle(Message::TestMode)
-        } else {
-            test_checkbox
-        });
-
-        let mut workflow = column![
-            section_title("03", "Writing method"),
-            row![
-                column![
-                    text("PARTITION SCHEME").size(10).style(text::secondary),
-                    text("Preserve image layout").size(14)
-                ]
-                .spacing(5)
-                .width(Fill),
-                column![
-                    text("TARGET FIRMWARE").size(10).style(text::secondary),
-                    text("From image").size(14)
-                ]
-                .spacing(5)
-                .width(Fill),
-                column![
-                    text("FILESYSTEM").size(10).style(text::secondary),
-                    text("From image").size(14)
-                ]
-                .spacing(5)
-                .width(Fill),
-                column![
-                    text("VOLUME LABEL").size(10).style(text::secondary),
-                    text("Preserve image label").size(14)
-                ]
-                .spacing(5)
-                .width(Fill),
-            ]
-            .spacing(12),
-            button(if self.advanced {
-                "Hide advanced details"
-            } else {
-                "Advanced details"
-            })
-            .on_press(Message::ToggleAdvanced)
-            .style(button::text),
-        ]
-        .spacing(12);
-        if self.advanced {
-            workflow = workflow.push(text("Raw mode copies the source bytes without changing its partition table, volume label, filesystem or bootloader. Read-back verifies the written image range; it does not prove firmware boot compatibility. The unused end of a larger target is outside verification coverage.").size(13));
-            workflow = workflow.push(text("Physical writes use the installed Polkit helper. Mounted or active system storage is rejected by the shared safety engine. Unmount eligible USB partitions through your desktop before planning.").size(13).style(text::secondary));
-            workflow = workflow.push(text("Keyboard: Ctrl+O source · Alt+Up/Down device · Alt+F file mode · Ctrl+P preview · F8 start · Esc cancel · Alt+T theme · Alt+L log. Tab/Shift+Tab move between text fields.").size(12).style(text::secondary));
-        }
-        workflow = workflow.push(
-            button(if self.planning {
-                "Preparing preview…"
-            } else {
-                "Preview exact operation"
-            })
-            .padding(12)
-            .on_press_maybe(self.can_plan().then_some(Message::MakePlan)),
-        );
-
-        let mut content = column![header, card(source), card(target), card(workflow)].spacing(18);
-        if let Some(plan) = &self.plan {
-            let physical = matches!(&plan.target_kind, TargetKind::Block(_));
-            let mut preview = column![
-                text(if physical {
-                    "ALL EXISTING DATA ON THIS DEVICE WILL BE DESTROYED"
-                } else {
-                    "CREATE A NEW DISPOSABLE OUTPUT FILE"
-                })
-                .size(15)
-                .style(if physical {
-                    text::danger
-                } else {
-                    text::success
-                }),
-                text(format!(
-                    "{} to {}",
-                    plan.image.path.display(),
-                    plan.target.display()
-                ))
-                .size(14),
-                text(format!(
-                    "{} bytes · target capacity {} bytes",
-                    plan.image.size, plan.capacity
-                ))
-                .size(13),
-                text(format!("Strategy: {}", plan.strategy)).size(13),
-                text("Revalidate identity, write image, flush, read back and compare SHA-256")
-                    .size(13),
-            ]
-            .spacing(10);
-            for warning in &plan.warnings {
-                preview = preview.push(text(warning).size(13).style(text::danger));
-            }
-            preview = preview.push(horizontal_rule(1));
-            preview = preview.push(
-                text(format!("Type exactly: {}", plan.confirmation))
-                    .size(13)
-                    .font(Font::MONOSPACE),
-            );
-            let confirm = text_input("Explicit confirmation", &self.confirmation)
-                .id(text_input::Id::new("confirmation"))
-                .padding(12)
-                .on_submit(Message::Start);
-            preview = preview.push(if self.running.is_none() {
-                confirm.on_input(Message::Confirmation)
-            } else {
-                confirm
-            });
-            preview = preview.push(
-                button(if physical {
-                    "Erase device, write & verify"
-                } else {
-                    "Create file, write & verify"
-                })
-                .padding(12)
-                .on_press_maybe(self.can_start().then_some(Message::Start))
-                .style(if physical {
-                    button::danger
-                } else {
-                    button::primary
-                }),
-            );
-            content = content.push(card(preview));
-        }
-        let mut status = column![text(&self.status).size(14)].spacing(10);
-        if let Some(running) = &self.running {
-            let progress = &running.progress;
-            let percent = if progress.total == 0 {
-                0.0
-            } else {
-                (progress.completed as f64 / progress.total as f64 * 100.0).clamp(0.0, 100.0) as f32
-            };
-            status = status.push(progress_bar(0.0..=100.0, percent));
-            status = status.push(
-                row![
+            for device in self.devices.iter().filter(|device| !device.eligible) {
+                drive = drive.push(
                     text(format!(
-                        "{:?} · {:.1}% · {} / {} · {}s",
-                        progress.stage,
-                        percent,
-                        size(progress.completed),
-                        size(progress.total),
-                        running.started.elapsed().as_secs()
+                        "{}: {}",
+                        device.path.display(),
+                        device.reasons.join("; ")
                     ))
-                    .size(12)
-                    .width(Fill),
-                    button(if running.cancel.is_cancelled() {
-                        "Cancelling…"
-                    } else {
-                        "Cancel safely"
-                    })
-                    .on_press_maybe((!running.cancel.is_cancelled()).then_some(Message::Cancel))
-                    .style(button::danger),
-                ]
-                .align_y(iced::Center),
+                    .size(11)
+                    .style(text::secondary),
+                );
+            }
+        }
+
+        let mut format = column![
+            section_title("Format Options"),
+            field("Volume label", readonly("Preserve image label")),
+            row![
+                field("File system", readonly("From image")),
+                field("Cluster size", readonly("From image"))
+            ]
+            .spacing(36),
+            button(
+                text(if self.advanced_format {
+                    "Hide advanced format options"
+                } else {
+                    "Show advanced format options"
+                })
+                .size(12)
+            )
+            .padding([1, 0])
+            .style(button::text)
+            .on_press_maybe(
+                (!self.confirm_open && !self.show_log).then_some(Message::ToggleAdvancedFormat)
+            ),
+        ]
+        .spacing(6);
+        if self.advanced_format {
+            format = format.push(
+                checkbox("Verify written image (required)", true)
+                    .size(14)
+                    .text_size(12),
             );
-            status = status.push(text("Interruption can leave this target incomplete. Keep it connected until the operation stops.").size(12).style(text::danger));
+            format = format.push(text("DD mode preserves the image's partitions, filesystem, label and bootloader. Read-back checks the source image range; unused target space is outside verification coverage.").size(11));
+            format = format.push(
+                checkbox("Dark theme", self.dark)
+                    .size(14)
+                    .text_size(12)
+                    .on_toggle(|_| Message::ToggleTheme),
+            );
+        }
+        let mut content = column![drive, format].spacing(14);
+        if self
+            .image
+            .as_ref()
+            .is_some_and(|image| !image.bootable_disk)
+        {
+            content = content.push(text("This image cannot be written in DD mode. Select an ISOHybrid or a disk image. ISO extraction is not available yet.").size(12).style(text::danger));
         }
         if let Some(error) = &self.error {
-            let concise: String = error.chars().take(600).collect();
-            status = status.push(text(concise).style(text::danger).size(13));
+            content = content.push(
+                text(error.chars().take(600).collect::<String>())
+                    .size(12)
+                    .style(text::danger),
+            );
         }
-        status = status.push(
-            button(if self.show_log {
-                "Hide execution log"
-            } else {
-                "Show execution log"
+        let progress = self.running.as_ref().map(|running| &running.progress);
+        let percent = progress
+            .map(|value| {
+                if value.total == 0 {
+                    0.0
+                } else {
+                    (value.completed as f64 / value.total as f64 * 100.0).clamp(0.0, 100.0) as f32
+                }
             })
-            .on_press(Message::ToggleLog)
-            .style(button::text),
-        );
-        if self.show_log {
-            let lines = self.log.iter().fold(column![].spacing(6), |column, line| {
-                column.push(text(line).font(Font::MONOSPACE).size(11))
+            .unwrap_or(if self.status.starts_with("Verified ") {
+                100.0
+            } else {
+                0.0
             });
-            status = status.push(scrollable(lines).height(180));
-        }
+        let bar_label = if let Some(running) = &self.running {
+            if running.cancel.is_cancelled() {
+                "CANCELLING".into()
+            } else {
+                format!("{}: {:.1}%", stage_name(running.progress.stage), percent)
+            }
+        } else if self.picking {
+            "SELECT AN IMAGE".into()
+        } else if self.inspecting {
+            "ANALYZING IMAGE".into()
+        } else if self.planning {
+            "PREPARING OPERATION".into()
+        } else if self.error.is_some() {
+            "ERROR".into()
+        } else if self.status.starts_with("Verified ") {
+            "DONE".into()
+        } else {
+            "READY".into()
+        };
+        let progress_widget = iced::widget::stack![
+            progress_bar(0.0..=100.0, percent)
+                .height(22)
+                .style(classic_progress),
+            container(text(bar_label).size(12).color(if percent > 55.0 {
+                Color::WHITE
+            } else {
+                self.theme().palette().text
+            }))
+            .width(Fill)
+            .height(22)
+            .center_x(Fill)
+            .center_y(22),
+        ];
+        let cancelling = self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.cancel.is_cancelled());
+        let actions = row![
+            button(text("Log").size(12))
+                .padding([4, 7])
+                .style(classic_button)
+                .on_press_maybe((!self.confirm_open).then_some(Message::ToggleLog)),
+            button(text("Refresh").size(12))
+                .padding([4, 7])
+                .style(classic_button)
+                .on_press_maybe(
+                    (!self.discovering && !self.confirm_open && !self.show_log)
+                        .then_some(Message::Refresh)
+                ),
+            iced::widget::Space::with_width(Fill),
+            button(text("START").size(12).center())
+                .width(94)
+                .padding([2, 8])
+                .style(classic_button)
+                .on_press_maybe(
+                    (self.can_plan() && self.smoke_started.is_none() && !self.show_log)
+                        .then_some(Message::MakePlan)
+                ),
+            button(
+                text(if self.running.is_some() {
+                    "CANCEL"
+                } else {
+                    "CLOSE"
+                })
+                .size(12)
+                .center()
+            )
+            .width(94)
+            .padding([2, 8])
+            .style(classic_button)
+            .on_press_maybe(
+                (!cancelling && !self.confirm_open && !self.show_log).then_some(
+                    if self.running.is_some() {
+                        Message::Cancel
+                    } else {
+                        Message::CloseRequested
+                    }
+                )
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Center);
+        let bottom = if self.running.is_some()
+            || self.planning
+            || self.inspecting
+            || self.error.is_some()
+            || self.status.starts_with("Verified ")
+        {
+            ellipsize(&self.status, 58)
+        } else if self.test_mode {
+            "Disposable file mode — new files only".into()
+        } else {
+            format!("{} USB device(s) found", self.choices.len())
+        };
+        let elapsed = self
+            .running
+            .as_ref()
+            .map(|running| {
+                let seconds = running.started.elapsed().as_secs();
+                format!(
+                    "{:02}:{:02}:{:02}",
+                    seconds / 3600,
+                    seconds / 60 % 60,
+                    seconds % 60
+                )
+            })
+            .unwrap_or_default();
         let footer = column![
-            card(status),
-            text("ForgeUSB 0.1 · Linux native · Raw image engine · No target is selected automatically")
-                .size(11)
-                .style(text::secondary),
-        ].spacing(10);
-        container(column![
-            scrollable(container(content).max_width(1060).padding(28))
-                .id(scrollable::Id::new("workflow"))
-                .width(Fill)
-                .height(Fill),
-            container(footer).max_width(1060).padding([12, 28]),
+            section_title("Status"),
+            progress_widget,
+            container(actions).padding([6, 0])
+        ]
+        .spacing(12);
+        let base: Element<'_, Message> = container(column![
+            scrollable(container(content).padding(iced::Padding {
+                top: 12.0,
+                right: 14.0,
+                bottom: 0.0,
+                left: 14.0
+            }))
+            .id(scrollable::Id::new("workflow"))
+            .width(Fill)
+            .height(Fill),
+            container(footer).padding([10, 14]),
+            horizontal_rule(1),
+            container(row![text(bottom).size(11).width(Fill), text(elapsed).size(11)].spacing(8))
+                .padding([5, 7]),
         ])
-        .style(|theme: &Theme| container::Style {
-            background: Some(theme.palette().background.into()),
-            text_color: Some(theme.palette().text),
-            ..Default::default()
-        })
         .width(Fill)
         .height(Fill)
+        .style(dialog_background)
+        .into();
+        if self.confirm_open && self.plan.is_some() {
+            modal(base, self.confirmation_view())
+        } else if self.show_log {
+            let lines = self.log.iter().fold(column![].spacing(6), |lines, line| {
+                lines.push(text(line).size(11))
+            });
+            modal(
+                base,
+                column![
+                    text("Log").size(17),
+                    scrollable(lines).height(340),
+                    row![
+                        iced::widget::Space::with_width(Fill),
+                        button(text("CLOSE").size(12))
+                            .style(classic_button)
+                            .padding([4, 18])
+                            .on_press(Message::ToggleLog)
+                    ],
+                ]
+                .spacing(12)
+                .into(),
+            )
+        } else {
+            base
+        }
+    }
+
+    fn confirmation_view(&self) -> Element<'_, Message> {
+        let plan = self.plan.as_ref().expect("confirmation requires a plan");
+        let physical = matches!(plan.target_kind, TargetKind::Block(_));
+        let mut details = column![
+            text(if physical {
+                "All data on this device will be destroyed."
+            } else {
+                "Create a new disposable image file."
+            })
+            .size(13),
+            text(format!(
+                "Image: {}\nTarget: {}\nImage size: {} bytes\nCapacity: {} bytes",
+                plan.image.path.display(),
+                plan.target.display(),
+                plan.image.size,
+                plan.capacity
+            ))
+            .size(12),
+            text("Write image, flush, then verify every source byte by read-back.").size(12),
+        ]
+        .spacing(8);
+        for warning in &plan.warnings {
+            details = details.push(text(warning).size(11));
+        }
+        let confirm = text_input("Type the exact confirmation above", &self.confirmation)
+            .id(text_input::Id::new("confirmation"))
+            .size(12)
+            .padding([5, 6])
+            .style(classic_input)
+            .on_input(Message::Confirmation)
+            .on_submit(Message::Start);
+        column![
+            text("Confirm operation").size(18),
+            scrollable(details).height(190),
+            horizontal_rule(1),
+            text("To confirm the model, path and capacity, type:").size(12),
+            text(&plan.confirmation).size(12).font(Font::MONOSPACE),
+            confirm,
+            row![
+                iced::widget::Space::with_width(Fill),
+                button(text("START").size(12))
+                    .width(94)
+                    .padding([2, 8])
+                    .style(classic_button)
+                    .on_press_maybe(self.can_start().then_some(Message::Start)),
+                button(text("CANCEL").size(12))
+                    .width(94)
+                    .padding([2, 8])
+                    .style(classic_button)
+                    .on_press(Message::DismissPlan),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12)
         .into()
     }
 }
 
-fn section_title<'a>(number: &'a str, title: &'a str) -> iced::widget::Row<'a, Message> {
+fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    column![text(label).size(12), control.into()]
+        .spacing(3)
+        .width(Fill)
+        .into()
+}
+
+fn readonly<'a>(value: impl Into<String>) -> Element<'a, Message> {
+    let value = value.into();
+    text_input("", &value)
+        .size(12)
+        .padding([2, 5])
+        .style(classic_input)
+        .into()
+}
+
+fn section_title<'a>(title: &'a str) -> Element<'a, Message> {
     row![
-        text(number).size(13).style(text::success),
-        text(title).size(19)
+        text(title).size(19).font(Font {
+            weight: iced::font::Weight::Bold,
+            ..Font::DEFAULT
+        }),
+        horizontal_rule(1).style(|theme: &Theme| iced::widget::rule::Style {
+            color: theme.palette().text,
+            width: 1,
+            radius: 0.0.into(),
+            fill_mode: iced::widget::rule::FillMode::Full,
+        }),
     ]
-    .spacing(12)
+    .spacing(10)
     .align_y(iced::Center)
+    .into()
+}
+
+fn dialog_background(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(theme.palette().background.into()),
+        text_color: Some(theme.palette().text),
+        ..Default::default()
+    }
+}
+
+fn modal<'a>(base: Element<'a, Message>, dialog: Element<'a, Message>) -> Element<'a, Message> {
+    iced::widget::stack![
+        base,
+        iced::widget::opaque(
+            container(
+                container(dialog)
+                    .padding(16)
+                    .width(Fill)
+                    .max_width(447)
+                    .style(|theme: &Theme| container::Style {
+                        border: iced::Border {
+                            color: Color::from_rgb8(135, 135, 135),
+                            width: 1.0,
+                            radius: 0.0.into()
+                        },
+                        ..dialog_background(theme)
+                    })
+            )
+            .padding(12)
+            .center_x(Fill)
+            .center_y(Fill)
+            .style(|_: &Theme| container::Style {
+                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.16).into()),
+                ..Default::default()
+            })
+        )
+    ]
+    .into()
+}
+
+fn classic_button(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = button::secondary(theme, status);
+    let dark = theme.palette().background.r < 0.5;
+    let disabled = matches!(status, button::Status::Disabled);
+    style.background = Some(
+        if dark {
+            Color::from_rgb8(63, 63, 63)
+        } else {
+            Color::from_rgb8(225, 225, 225)
+        }
+        .into(),
+    );
+    style.text_color = if disabled {
+        if dark {
+            Color::from_rgb8(145, 145, 145)
+        } else {
+            Color::from_rgb8(131, 131, 131)
+        }
+    } else {
+        theme.palette().text
+    };
+    style.border = iced::Border {
+        color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+            theme.palette().primary
+        } else if disabled {
+            Color::from_rgb8(200, 200, 200)
+        } else {
+            Color::from_rgb8(160, 160, 160)
+        },
+        width: 1.0,
+        radius: 0.0.into(),
+    };
+    style.shadow = iced::Shadow::default();
+    style
+}
+
+fn classic_input(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = text_input::default(theme, status);
+    let dark = theme.palette().background.r < 0.5;
+    let disabled = matches!(status, text_input::Status::Disabled);
+    style.background = if dark {
+        Color::from_rgb8(44, 44, 44)
+    } else if disabled {
+        Color::from_rgb8(246, 246, 246)
+    } else {
+        Color::WHITE
+    }
+    .into();
+    style.border = iced::Border {
+        color: if matches!(status, text_input::Status::Focused) {
+            theme.palette().primary
+        } else if disabled {
+            Color::from_rgb8(214, 214, 214)
+        } else {
+            Color::from_rgb8(166, 166, 166)
+        },
+        width: 1.0,
+        radius: 0.0.into(),
+    };
+    style.value = if disabled {
+        if dark {
+            Color::from_rgb8(170, 170, 170)
+        } else {
+            Color::from_rgb8(112, 112, 112)
+        }
+    } else {
+        theme.palette().text
+    };
+    style.placeholder = Color::from_rgb8(120, 120, 120);
+    style
+}
+
+fn classic_pick_list(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    pick_list::Style {
+        text_color: theme.palette().text,
+        placeholder_color: Color::from_rgb8(112, 112, 112),
+        handle_color: theme.palette().text,
+        background: if theme.palette().background.r < 0.5 {
+            Color::from_rgb8(44, 44, 44)
+        } else {
+            Color::WHITE
+        }
+        .into(),
+        border: iced::Border {
+            color: if matches!(
+                status,
+                pick_list::Status::Hovered | pick_list::Status::Opened
+            ) {
+                theme.palette().primary
+            } else {
+                Color::from_rgb8(166, 166, 166)
+            },
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+    }
+}
+
+fn classic_progress(theme: &Theme) -> progress_bar::Style {
+    progress_bar::Style {
+        background: if theme.palette().background.r < 0.5 {
+            Color::from_rgb8(48, 48, 48)
+        } else {
+            Color::from_rgb8(230, 230, 230)
+        }
+        .into(),
+        bar: Color::from_rgb8(6, 176, 37).into(),
+        border: iced::Border {
+            color: Color::from_rgb8(180, 180, 180),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+    }
+}
+
+fn ellipsize(value: &str, limit: usize) -> String {
+    let mut characters = value.chars();
+    let mut result: String = characters.by_ref().take(limit).collect();
+    if characters.next().is_some() {
+        result.push('…');
+    }
+    result
+}
+
+fn stage_name(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Inspecting => "Analyzing",
+        Stage::Revalidating => "Revalidating",
+        Stage::Writing => "Writing",
+        Stage::Flushing => "Flushing",
+        Stage::Verifying => "Verifying",
+        Stage::Complete => "Complete",
+    }
+}
+
+/// Only unprivileged, fixed system dialog executables are launched. No shell.
+/// A cancelled/closed parent waits for the owned child to be killed and reaped.
+fn select_image(cancel: &Cancellation) -> Result<Option<String>, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_dir())
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let downloads = home.join("Downloads");
+    let initial = if downloads.is_dir() { downloads } else { home };
+    let mut command = if std::path::Path::new("/usr/bin/kdialog").is_file() {
+        let mut command = Command::new("/usr/bin/kdialog");
+        command
+            .args(["--title", "Select an image — ForgeUSB", "--getopenfilename"])
+            .arg(&initial)
+            .arg("*.iso *.img *.dd *.raw|Disk images\n*|All files");
+        command
+    } else if std::path::Path::new("/usr/bin/zenity").is_file() {
+        let mut command = Command::new("/usr/bin/zenity");
+        command.args([
+            "--file-selection",
+            "--title=Select an image — ForgeUSB",
+            "--file-filter=Disk images | *.iso *.img *.dd *.raw",
+            "--file-filter=All files | *",
+        ]);
+        command.arg("--filename").arg(initial.join(""));
+        command
+    } else {
+        return Err("No native file chooser found. Install kdialog or zenity, or paste an absolute image path into Boot selection and press Enter.".into());
+    };
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Cannot open file chooser: {error}"))?;
+    let started = Instant::now();
+    loop {
+        if cancel.is_cancelled() || started.elapsed() >= Duration::from_secs(300) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return if cancel.is_cancelled() {
+                Ok(None)
+            } else {
+                Err("File chooser timed out. Please select the image again.".into())
+            };
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.code() == Some(1) {
+                    return Ok(None);
+                }
+                if !status.success() {
+                    return Err(format!(
+                        "File chooser exited with {status}. Paste the image path into Boot selection instead."
+                    ));
+                }
+                let mut output = Vec::new();
+                child
+                    .stdout
+                    .take()
+                    .ok_or("File chooser has no output")?
+                    .take(65_537)
+                    .read_to_end(&mut output)
+                    .map_err(|error| error.to_string())?;
+                if output.len() > 65_536 {
+                    return Err("File chooser returned an oversized path.".into());
+                }
+                let output =
+                    String::from_utf8(output).map_err(|_| "The image path must be valid UTF-8.")?;
+                let path = output.strip_suffix('\n').unwrap_or(&output);
+                if path.is_empty() {
+                    return Ok(None);
+                }
+                if path.contains(['\n', '\r']) || !std::path::Path::new(path).is_absolute() {
+                    return Err("Select one image with an absolute, single-line file path.".into());
+                }
+                return Ok(Some(path.to_owned()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("File chooser failed: {error}"));
+            }
+        }
+    }
 }
 
 fn shortcut(key: iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> Option<Message> {
@@ -1002,7 +1469,7 @@ fn shortcut(key: iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> O
     match key.as_ref() {
         Key::Named(Named::Tab) => Some(Message::FocusNext(modifiers.shift())),
         Key::Named(Named::Escape) => Some(Message::Cancel),
-        Key::Named(Named::F8) => Some(Message::Start),
+        Key::Named(Named::F8) => Some(Message::StartRequested),
         Key::Named(Named::ArrowDown) if modifiers.alt() => Some(Message::SelectRelative(1)),
         Key::Named(Named::ArrowUp) if modifiers.alt() => Some(Message::SelectRelative(-1)),
         Key::Character("o" | "O") if modifiers.control() => Some(Message::FocusImage),
@@ -1014,52 +1481,6 @@ fn shortcut(key: iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> O
         Key::Character("a" | "A") if modifiers.alt() => Some(Message::ToggleAdvanced),
         _ => None,
     }
-}
-
-fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    container(content)
-        .padding(20)
-        .width(Fill)
-        .style(|theme: &Theme| {
-            let dark = theme.palette().background.r < 0.5;
-            container::Style {
-                background: Some(
-                    if dark {
-                        Color::from_rgb8(26, 33, 43)
-                    } else {
-                        Color::WHITE
-                    }
-                    .into(),
-                ),
-                text_color: Some(theme.palette().text),
-                border: iced::Border {
-                    color: if dark {
-                        Color::from_rgb8(48, 61, 76)
-                    } else {
-                        Color::from_rgb8(210, 219, 228)
-                    },
-                    width: 1.0,
-                    radius: 10.0.into(),
-                },
-                ..Default::default()
-            }
-        })
-        .into()
-}
-
-fn badge<'a>(label: impl Into<String>) -> Element<'a, Message> {
-    container(text(label.into()).size(12))
-        .padding([5, 9])
-        .style(|theme: &Theme| container::Style {
-            text_color: Some(theme.palette().text),
-            border: iced::Border {
-                color: theme.palette().primary.scale_alpha(0.45),
-                width: 1.0,
-                radius: 5.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
 }
 
 fn size(bytes: u64) -> String {
@@ -1285,6 +1706,7 @@ mod tests {
         let plan = plan();
         state.confirmation = format!("{} ", plan.confirmation);
         state.plan = Some(plan.clone());
+        state.confirm_open = true;
         assert!(!state.can_start());
         state.confirmation = plan.confirmation;
         assert!(state.can_start());
@@ -1319,5 +1741,35 @@ mod tests {
         assert!(!state.planning);
         assert!(state.plan.is_none());
         assert!(!state.can_start());
+    }
+    #[test]
+    fn dismissing_confirmation_revokes_the_plan() {
+        let mut state = State::empty(Options::default());
+        let plan = plan();
+        state.confirmation = plan.confirmation.clone();
+        state.plan = Some(plan);
+        state.confirm_open = true;
+        assert!(state.can_start());
+        let _ = state.update(Message::DismissPlan);
+        assert!(!state.confirm_open);
+        assert!(state.plan.is_none());
+        assert!(state.confirmation.is_empty());
+        assert!(state.running.is_none());
+        assert!(!state.can_start());
+    }
+
+    #[test]
+    fn picking_a_source_blocks_planning_and_close_cancels_the_picker() {
+        let mut state = State::empty(Options::default());
+        state.test_mode = true;
+        state.test_path = "/tmp/never-written-picker-test.img".into();
+        state.image_path = "/tmp/never-opened-source.img".into();
+        assert!(state.can_plan());
+        state.picking = true;
+        assert!(!state.can_plan());
+        let _ = state.update(Message::CloseRequested);
+        assert!(state.picker_cancel.is_cancelled());
+        assert!(state.exit_after_operation);
+        assert!(state.running.is_none());
     }
 }

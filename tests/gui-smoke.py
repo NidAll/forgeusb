@@ -3,7 +3,8 @@
 
 Only --smoke-test is launched: Start remains disabled inside the application.
 The target is a fresh pathname in an exclusively owned TemporaryDirectory.
-Optional keyboard input sends Ctrl+P only, never confirmation or Start.
+Optional keyboard input selects the source in the native file chooser and/or
+sends Ctrl+P. It never types a destructive confirmation or presses Start.
 
 Example:
   python3 tests/gui-smoke.py --preview --screenshot \
@@ -37,6 +38,10 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--source", type=Path, default=ROOT / "test-output/bios-source.img")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "test-output/gui-release-smoke")
     parser.add_argument("--preview", action="store_true", help="send read-only Ctrl+P preview")
+    parser.add_argument("--browse", action="store_true", help="select the source using kdialog or zenity")
+    parser.add_argument("--device-mode", action="store_true", help="capture the normal USB selector without choosing a device")
+    parser.add_argument("--small", action="store_true", help="exercise the minimum 440x540 window size")
+    parser.add_argument("--advanced", action="store_true", help="show advanced drive properties")
     parser.add_argument("--screenshot", action="store_true", help="retain screenshots for visual review")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
@@ -57,8 +62,8 @@ def capture(destination: Path) -> None:
     )
 
 
-def preview_keyboard() -> None:
-    """Send exactly Ctrl+P to the ForgeUSB window on this private display."""
+def keyboard_input(window_title: str, *, keys: tuple[str, ...] = (), value: str = "", dimensions: tuple[int, int] | None = None) -> None:
+    """Send bounded test input only to a named window on the private display."""
     x = c.CDLL("libX11.so.6")
     xt = c.CDLL("libXtst.so.6")
     x.XOpenDisplay.argtypes = [c.c_char_p]
@@ -70,12 +75,20 @@ def preview_keyboard() -> None:
         c.POINTER(c.POINTER(c.c_ulong)), c.POINTER(c.c_uint),
     ]
     x.XFetchName.argtypes = [c.c_void_p, c.c_ulong, c.POINTER(c.c_void_p)]
+    x.XInternAtom.argtypes = [c.c_void_p, c.c_char_p, c.c_int]
+    x.XInternAtom.restype = c.c_ulong
+    x.XGetWindowProperty.argtypes = [c.c_void_p, c.c_ulong, c.c_ulong, c.c_long,
+        c.c_long, c.c_int, c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_int),
+        c.POINTER(c.c_ulong), c.POINTER(c.c_ulong), c.POINTER(c.c_void_p)]
     x.XFree.argtypes = [c.c_void_p]
     x.XSetInputFocus.argtypes = [c.c_void_p, c.c_ulong, c.c_int, c.c_ulong]
+    x.XResizeWindow.argtypes = [c.c_void_p, c.c_ulong, c.c_uint, c.c_uint]
     x.XStringToKeysym.argtypes = [c.c_char_p]
     x.XStringToKeysym.restype = c.c_ulong
     x.XKeysymToKeycode.argtypes = [c.c_void_p, c.c_ulong]
     x.XKeysymToKeycode.restype = c.c_ubyte
+    x.XKeycodeToKeysym.argtypes = [c.c_void_p, c.c_ubyte, c.c_int]
+    x.XKeycodeToKeysym.restype = c.c_ulong
     x.XFlush.argtypes = [c.c_void_p]
     x.XCloseDisplay.argtypes = [c.c_void_p]
     xt.XTestFakeKeyEvent.argtypes = [c.c_void_p, c.c_uint, c.c_int, c.c_ulong]
@@ -88,25 +101,54 @@ def preview_keyboard() -> None:
         require(bool(x.XQueryTree(display, root, c.byref(root_out), c.byref(parent),
                                  c.byref(children), c.byref(count))), "cannot list private windows")
         window = None
+        titles = []
         try:
             for index in range(count.value):
+                title = ""
                 name = c.c_void_p()
                 if x.XFetchName(display, children[index], c.byref(name)) and name.value:
                     title = c.string_at(name).decode(errors="replace")
                     x.XFree(name)
-                    if title.startswith("ForgeUSB"):
-                        window = children[index]
-                        break
+                # Qt uses the UTF-8 title property for non-Latin-1 dialog titles.
+                atom = x.XInternAtom(display, b"_NET_WM_NAME", 1)
+                actual_type, count_bytes, remaining = c.c_ulong(), c.c_ulong(), c.c_ulong()
+                actual_format, value_bytes = c.c_int(), c.c_void_p()
+                if atom and x.XGetWindowProperty(display, children[index], atom, 0, 1024, 0, 0,
+                        c.byref(actual_type), c.byref(actual_format), c.byref(count_bytes),
+                        c.byref(remaining), c.byref(value_bytes)) == 0 and value_bytes.value:
+                    try:
+                        if actual_format.value == 8:
+                            title = c.string_at(value_bytes, count_bytes.value).decode(errors="replace")
+                    finally:
+                        x.XFree(value_bytes)
+                titles.append(title)
+                if title.startswith(window_title):
+                    window = children[index]
+                    break
         finally:
             x.XFree(children)
-        require(window is not None, "ForgeUSB window not found on private display")
+        require(window is not None, f"{window_title} window not found on private display; available: {titles}")
         x.XSetInputFocus(display, window, 2, 0)
-        control = x.XKeysymToKeycode(display, x.XStringToKeysym(b"Control_L"))
-        key_p = x.XKeysymToKeycode(display, x.XStringToKeysym(b"p"))
-        require(bool(control and key_p), "private X server has no expected keymap")
-        for key, pressed in ((control, 1), (key_p, 1), (key_p, 0), (control, 0)):
+        if dimensions is not None:
+            x.XResizeWindow(display, window, *dimensions)
+        codes = [x.XKeysymToKeycode(display, x.XStringToKeysym(key.encode())) for key in keys]
+        require(all(codes), "private X server has no expected keymap")
+        for key, pressed in [(key, 1) for key in codes] + [(key, 0) for key in reversed(codes)]:
             require(bool(xt.XTestFakeKeyEvent(display, key, pressed, 0)),
-                    "could not send the read-only preview shortcut")
+                    "could not send the test shortcut")
+        shift = x.XKeysymToKeycode(display, x.XStringToKeysym(b"Shift_L"))
+        for character in value:
+            require(32 <= ord(character) < 127, "native chooser test requires an ASCII fixture path")
+            code = x.XKeysymToKeycode(display, ord(character))
+            require(bool(code), "fixture character has no keycode")
+            shifted = x.XKeycodeToKeysym(display, code, 0) != ord(character)
+            require(not shifted or x.XKeycodeToKeysym(display, code, 1) == ord(character), "unexpected fixture keymap")
+            if shifted:
+                xt.XTestFakeKeyEvent(display, shift, 1, 0)
+            xt.XTestFakeKeyEvent(display, code, 1, 0)
+            xt.XTestFakeKeyEvent(display, code, 0, 0)
+            if shifted:
+                xt.XTestFakeKeyEvent(display, shift, 0, 0)
         x.XFlush(display)
     finally:
         x.XCloseDisplay(display)
@@ -121,6 +163,7 @@ def run_child(args: argparse.Namespace) -> dict:
     env.pop("WAYLAND_DISPLAY", None)
     env.pop("WAYLAND_SOCKET", None)
     env["WINIT_UNIX_BACKEND"] = "x11"
+    env["QT_QPA_PLATFORM"] = "xcb"
     screenshots = []
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="forgeusb-owned-gui-smoke-") as directory:
@@ -128,16 +171,18 @@ def run_child(args: argparse.Namespace) -> dict:
         require(not target.exists(), "test target unexpectedly exists")
         log_path = args.output_dir / "gui.log"
         with log_path.open("w", encoding="utf-8") as log:
+            command = [str(args.binary), "--image", "" if args.browse else str(args.source), "--smoke-test"]
+            if not args.device_mode:
+                command.extend(["--test-output", str(target)])
             app = subprocess.Popen(
-                [str(args.binary), "--image", str(args.source), "--test-output",
-                 str(target), "--smoke-test"],
+                command,
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
             try:
-                if args.preview or args.screenshot:
+                if args.preview or args.screenshot or args.browse or args.small or args.advanced:
                     frame = args.output_dir / "gui-main.png" if args.screenshot else Path(directory) / "frame.png"
                     # Initial font/cache work can delay mapping under concurrent build load.
                     # Black empty Xvfb frames are tiny PNGs; retain only a rendered UI.
@@ -149,10 +194,34 @@ def run_child(args: argparse.Namespace) -> dict:
                             break
                         require(time.monotonic() < deadline, "GUI did not render before deadline")
                         time.sleep(0.25)
+                    if args.small:
+                        keyboard_input("ForgeUSB", dimensions=(440, 540))
+                    if args.advanced:
+                        keyboard_input("ForgeUSB", keys=("Alt_L", "a"))
+                    if args.small or args.advanced:
+                        time.sleep(0.2)
+                        capture(frame)
+                    if args.browse:
+                        keyboard_input("ForgeUSB", keys=("Control_L", "o"))
+                        deadline = time.monotonic() + 4
+                        while True:
+                            try:
+                                name_keys = ("Alt_L", "n") if Path("/usr/bin/kdialog").is_file() else ("Control_L", "l")
+                                keyboard_input("Select an image", keys=name_keys)
+                                break
+                            except RuntimeError as error:
+                                require(time.monotonic() < deadline, f"native file chooser did not open: {error}")
+                                time.sleep(0.2)
+                        keyboard_input("Select an image", keys=("Control_L", "a"))
+                        keyboard_input("Select an image", value=str(args.source))
+                        keyboard_input("Select an image", keys=("Return",))
+                        time.sleep(0.7)
+                        if args.screenshot:
+                            capture(frame)
                     if args.screenshot:
                         screenshots.append(str(frame))
                     if args.preview:
-                        preview_keyboard()
+                        keyboard_input("ForgeUSB", keys=("Control_L", "p"))
                         # A true shared-engine plan runs asynchronously and hashes the source.
                         time.sleep(2.5)
                         if args.screenshot:
@@ -161,6 +230,10 @@ def run_child(args: argparse.Namespace) -> dict:
                             require(preview.stat().st_size > 4096, "preview screenshot is empty")
                             screenshots.append(str(preview))
                 returncode = app.wait(timeout=25)
+            except Exception:
+                if args.screenshot and app.poll() is None:
+                    capture(args.output_dir / "gui-failure.png")
+                raise
             finally:
                 if app.poll() is None:
                     app.terminate()
@@ -173,6 +246,14 @@ def run_child(args: argparse.Namespace) -> dict:
         require(not target.exists(), "smoke test unexpectedly created the target file")
         require("no write requested." in log_path.read_text(encoding="utf-8"),
                 "missing successful application smoke completion record")
+        prefix = "ForgeUSB GUI smoke state: "
+        states = [json.loads(line[len(prefix):]) for line in log_path.read_text(encoding="utf-8").splitlines()
+                  if line.startswith(prefix)]
+        require(bool(states) and states[-1]["image"] == str(args.source), "source image was not analyzed")
+        require(not states[-1]["running"], "smoke mode unexpectedly started an operation")
+        if args.preview:
+            require(states[-1]["plan_ready"] and states[-1]["confirmation_open"],
+                    "read-only confirmation was not prepared")
     return {
         "ok": True,
         "binary": str(args.binary),
@@ -181,6 +262,10 @@ def run_child(args: argparse.Namespace) -> dict:
         "target_created": False,
         "private_display": display,
         "preview_shortcut_sent": args.preview,
+        "native_file_chooser_exercised": args.browse,
+        "normal_device_mode": args.device_mode,
+        "small_window": args.small,
+        "advanced_properties": args.advanced,
         "screenshots": screenshots,
         "preview_visual_review_required": bool(args.preview and args.screenshot),
         "elapsed_seconds": round(time.monotonic() - started, 2),
@@ -191,6 +276,7 @@ def run_child(args: argparse.Namespace) -> dict:
 def main() -> int:
     args = arguments()
     require(os.geteuid() != 0, "GUI tests must run as the ordinary desktop user")
+    require(not (args.device_mode and args.preview), "device-mode smoke never plans operations against physical devices")
     args.binary = args.binary.resolve(strict=True)
     args.source = args.source.resolve(strict=True)
     require(args.binary.is_file() and os.access(args.binary, os.X_OK), "GUI binary is not executable")
@@ -212,6 +298,14 @@ def main() -> int:
     ]
     if args.preview:
         command.append("--preview")
+    if args.browse:
+        command.append("--browse")
+    if args.device_mode:
+        command.append("--device-mode")
+    if args.small:
+        command.append("--small")
+    if args.advanced:
+        command.append("--advanced")
     if args.screenshot:
         command.append("--screenshot")
     process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

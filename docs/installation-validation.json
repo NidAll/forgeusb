@@ -1,0 +1,99 @@
+{
+  "date": "2026-10-17",
+  "scope": "icon, installer and authorized local system installation",
+  "quality_gates": {
+    "fmt": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "workspace_tests": 44,
+    "release_build": "passed"
+  },
+  "installed_prefix": "/usr",
+  "installed_payload_files": 17,
+  "all_installed_hashes_verified": true,
+  "installed_binary_sha256": {
+    "forgeusb": "23a87451fafdeafcdc2181bfa3728ace6693ecdeab1031b99740eaff6c26e556",
+    "forgeusb-gui": "08bd5f28b910c1d4ec399f04009850c60af235a4bf43bfdb239edaff0fd64a18"
+  },
+  "helper_sha256": "95b22bad932e03a1409071c4d8225f67d78f66065f73bd581ebba8c6111511af",
+  "helper_and_parent_owner": "root",
+  "helper_mode": "0755",
+  "policy_registered": true,
+  "active_session_policy": "auth_admin",
+  "installer_test": {
+    "ok": true,
+    "staged_files": 17,
+    "png_sizes": 7,
+    "existing_destination_refused": true,
+    "symlink_destination_refused": true,
+    "changed_file_uninstall_refused": true,
+    "receipt_matched_uninstall": true,
+    "elevation": false,
+    "physical_writes": 0
+  },
+  "window_icon": {
+    "ok": true,
+    "window_class": "WM_CLASS(STRING) = \"forgeusb\", \"forgeusb\"",
+    "embedded_icon_dimensions": [
+      64,
+      64
+    ],
+    "embedded_icon_property": true,
+    "physical_writes": 0
+  },
+  "installed_gui_smoke": {
+    "ok": true,
+    "binary": "/usr/bin/forgeusb-gui",
+    "source": "<home>/Projects/forgeusb/test-output/bios-source.img",
+    "exit_code": 0,
+    "target_created": false,
+    "private_display": ":99",
+    "preview_shortcut_sent": true,
+    "native_file_chooser_exercised": true,
+    "normal_device_mode": false,
+    "small_window": false,
+    "advanced_properties": false,
+    "screenshots": [
+      "<home>/Projects/forgeusb/test-output/installed-gui-smoke/gui-main.png",
+      "<home>/Projects/forgeusb/test-output/installed-gui-smoke/gui-preview.png"
+    ],
+    "preview_visual_review_required": true,
+    "elapsed_seconds": 10.05,
+    "log": "<home>/Projects/forgeusb/test-output/installed-gui-smoke/gui.log"
+  },
+  "installed_cli_file_integration": {
+    "tests": [
+      {
+        "layout": "dos",
+        "filesystem": "fat32",
+        "read_only_plan": true,
+        "write_readback": true,
+        "overwrite_refused": true,
+        "corruption_detected": true
+      },
+      {
+        "layout": "gpt",
+        "filesystem": "fat32",
+        "read_only_plan": true,
+        "write_readback": true,
+        "overwrite_refused": true,
+        "corruption_detected": true
+      },
+      {
+        "layout": "dos",
+        "filesystem": "ntfs",
+        "read_only_plan": true,
+        "write_readback": true,
+        "overwrite_refused": true,
+        "corruption_detected": true
+      },
+      {
+        "plain_optical_iso_refused": true
+      }
+    ],
+    "physical_writes": 0,
+    "loop_devices": 0
+  },
+  "physical_writes": 0,
+  "loop_devices": 0,
+  "root_gui": false
+}

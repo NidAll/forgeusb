@@ -1,10 +1,10 @@
 # Validation record
 
-Validated 2026-10-17 on CachyOS x86_64, Rust 1.99.0, ordinary UID1000. No physical storage write, loop attachment, root GUI, privileged installation or host firmware modification was performed.
+Initial engineering build validated 2026-10-17 on CachyOS x86_64, Rust 1.99.0, ordinary UID1000. At that stage no physical storage write, loop attachment, root GUI, privileged installation or host firmware modification was performed. The subsequent authorized installation is recorded below.
 
 ## Automated gates
 
-The workspace uses per-command environment overrides `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/cc`, `CARGO_BUILD_JOBS=1`, `CARGO_PROFILE_DEV_DEBUG=0` because the inherited linker name was absent. Global configuration was not modified. Final gate results are in `validation-results.json`; original command logs are retained locally in ignored `test-output/`.
+The workspace uses per-command environment overrides `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/cc`, `CARGO_BUILD_JOBS=1`, `CARGO_PROFILE_DEV_DEBUG=0` because the inherited linker name was absent. Global configuration was not modified. Initial engineering-build gate results are in `validation-results.json`; original command logs are retained locally in ignored `test-output/`.
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
@@ -29,6 +29,24 @@ QEMU commands attach no `/dev` host paths. They are retained in test-output/alpi
 
 ## GUI and packaging
 
-Ordinary-user GUI launch, real SHA-256 inspection, live read-only device discovery, keyboard preview and automatic focus/scroll were exercised on an isolated Xvfb display; smoke mode forbids starting a write and no output file appeared. Main and preview screenshots were visually inspected. Physical helper was not installed and no root GUI was run. See gui-smoke.png and gui-plan-smoke.png.
+Ordinary-user GUI launch, real SHA-256 inspection, live read-only device discovery, keyboard preview and automatic focus/scroll were exercised on an isolated Xvfb display; smoke mode forbids starting a write and no output file appeared. Main and preview screenshots were visually inspected. Physical helper was not installed and no root GUI was run. The current screenshots gui-smoke.png and gui-plan-smoke.png show the subsequent compact UI rework described below.
 
 Desktop/SVG/Polkit XML and shell metadata were validated. The final packaging stage/source-archive results are recorded in validation-results.json. Debian/RPM recipes are untested scaffolding, not verified installable binary packages. Dependency notices collect the locked Linux target; the drm-fourcc package omits a license file upstream and that unresolved notice is explicitly recorded. This evidence supports an initial engineering build, not a production-ready release claim.
+
+## Compact GUI rework (2026-10-17)
+
+The current GUI follows Rufus's compact dialog hierarchy, with a light gray default, square controls, native SELECT, and a separate exact-confirmation review. Read-only DD properties remain truthful to the raw engine. [Visual QA](../design-qa.md) records the reference/state differences.
+
+Re-ran formatting, strict workspace Clippy, all **44 tests**, and the full locked release build successfully. Current binary hashes and structured private-Xvfb results are in [ui-validation-results.json](ui-validation-results.json). The older validation-results.json hashes refer to the initial engineering build.
+
+Release GUI tests exercised native KDE image selection, actual source inspection and read-only planning, normal device discovery without selecting a physical disk, and the 440 × 540 minimum window with advanced properties expanded. No smoke test created a target. A separate real GUI run typed the exact confirmation, wrote a newly owned 4 MiB ordinary temporary file, flushed and read back its complete source range; external CLI verification and SHA-256 comparison also passed. The screenshot showed DONE and the verified byte count. Its fixture directory was automatically removed. Zero physical writes, loop devices or privileged installations. GTK picker fallback and physical Polkit interaction were not exercised.
+
+## Icon integration and authorized installation (2026-10-17)
+
+The original ForgeUSB SVG is rendered into seven checked-in PNG sizes and a 64 × 64 RGBA window asset. The actual X11 window publishes `_NET_WM_ICON` and WM_CLASS `forgeusb`; Wayland uses the matching desktop app ID. The compact client layout is unchanged. Regeneration uses `bash packaging/generate-icons.sh` with librsvg/ImageMagick; normal Rust builds need neither tool.
+
+Formatting, strict Clippy, 44 workspace tests and the locked release build pass. `tests/installation.py` stages all 17 payload files in an owned temporary directory and checks hashes, modes, PNG dimensions, existing/symlink staging refusal, changed-file uninstall refusal and complete receipt-matched removal. CI now runs these checks without elevation.
+
+At the user's explicit request, `bash packaging/install.sh --system --no-build` installed the application, icons, license notices and narrow Polkit helper on this CachyOS machine. All 17 files matched the receipt; binaries/helper and parent directories are root-owned 0755, policy/desktop entry are 0644. Polkit reports `auth_admin` for active users and refuses inactive/other sessions. The installed GUI remains UID1000. This validates installation and policy registration, not a physical write authorization flow.
+
+The installed CLI passed the disposable-file FAT32/NTFS, MBR/GPT, read-back, corruption and ISO-refusal integration checks. The installed GUI passed native KDE chooser → inspection → read-only plan smoke with no target creation. It was opened normally from `/usr/bin/forgeusb-gui` on the user's desktop. No physical write, loop attachment or root GUI occurred. See [installation-validation.json](installation-validation.json).

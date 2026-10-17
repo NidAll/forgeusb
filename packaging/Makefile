@@ -13,6 +13,9 @@ install:
 	install -Dm755 $(TARGET_DIR)/release/forgeusb-gui $(DESTDIR)$(PREFIX)/bin/forgeusb-gui
 	install -Dm755 $(TARGET_DIR)/release/forgeusb-helper $(DESTDIR)$(PREFIX)/lib/forgeusb/forgeusb-helper
 	install -Dm644 packaging/forgeusb.desktop $(DESTDIR)$(PREFIX)/share/applications/forgeusb.desktop
+	for size in 16 24 32 48 64 128 256; do \
+		install -Dm644 packaging/icons/forgeusb-$$size.png $(DESTDIR)$(PREFIX)/share/icons/hicolor/$${size}x$${size}/apps/forgeusb.png; \
+	done
 	install -Dm644 packaging/icons/forgeusb.svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/forgeusb.svg
 	install -Dm644 packaging/polkit/io.forgeusb.write.policy $(DESTDIR)$(PREFIX)/share/polkit-1/actions/io.forgeusb.write.policy
 	install -Dm644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/forgeusb/LICENSE

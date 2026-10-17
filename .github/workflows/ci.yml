@@ -57,6 +57,11 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked
 
+      - name: Validate installer staging and desktop integration
+        run: |
+          python3 tests/installation.py
+          bash -n packaging/install.sh packaging/generate-icons.sh
+
       - name: Exercise write, verification, and corruption handling on owned files
         run: python3 tests/file-integration.py --cli target/release/forgeusb
 

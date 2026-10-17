@@ -9,7 +9,7 @@ Rules-Requires-Root: no
 Package: forgeusb
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, util-linux, policykit-1, libxkbcommon0, libfontconfig1
-Suggests: wimtools
+Suggests: wimtools, kdialog | zenity
 Description: Native Linux USB image writer
  Inspect, plan, write and verify raw images with explicit target confirmation.
  Windows installation-media creation is not yet implemented.

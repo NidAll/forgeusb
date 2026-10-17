@@ -22,6 +22,8 @@ If additional dependencies are present in the workspace manifest, use the genera
 | Component | Status/purpose | License/distribution note |
 |---|---|---|
 | Linux sysfs/procfs, util-linux lsblk/blkid | Live topology/mount/filesystem observation | util-linux is mixed-license; distributed by OS, no utility binaries bundled |
+| kdialog / zenity | Optional native image chooser, fixed `/usr/bin/kdialog` or `/usr/bin/zenity`; unprivileged, bounded child lifetime/output, no shell | OS-provided utilities; no binary linked or bundled. Installed Arch package metadata reports kdialog LGPL-2.0-or-later and Zenity LGPL-2.1-or-later |
+| Python 3 | Source-checkout installer and staging tests only | OS dependency; no Python runtime needed by Rust CLI/GUI |
 | Polkit/pkexec | Installed fixed helper authorization | System dependency; policy itself is project source |
 | wimlib-imagex | Optional standalone WIM staging only, fixed `/usr/bin/wimlib-imagex` | GPL-3.0-or-later program; wimlib library has LGPL licensing distinctions. No binary linked/bundled |
 | libfdisk/sfdisk, mkfs.fat, mkntfs, mkfs.exfat, mke2fs | Candidate future audited partition/format executors | Not invoked by the pure planner; package licensing assessed at integration |

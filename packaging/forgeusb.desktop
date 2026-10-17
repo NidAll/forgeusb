@@ -9,3 +9,4 @@ Terminal=false
 Categories=System;
 Keywords=USB;ISO;image;boot;disk;
 StartupNotify=true
+StartupWMClass=forgeusb

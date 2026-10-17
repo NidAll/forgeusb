@@ -7,7 +7,7 @@ arch=('x86_64')
 license=('GPL-3.0-or-later')
 depends=('glibc' 'gcc-libs' 'util-linux' 'polkit' 'libxkbcommon' 'fontconfig')
 makedepends=('rust' 'cargo' 'make')
-optdepends=('wimlib: standalone unprivileged WIM staging' 'wayland: Wayland display session' 'libx11: X11 display session')
+optdepends=('wimlib: standalone unprivileged WIM staging' 'wayland: Wayland display session' 'libx11: X11 display session' 'kdialog: native KDE image chooser' 'zenity: fallback GTK image chooser')
 source=("forgeusb-${pkgver}.tar.gz")
 # Updated to an exact SHA-256 by make-source-archive.sh in its generated recipe copy.
 sha256sums=('REGENERATE_WITH_MAKE_SOURCE_ARCHIVE')
