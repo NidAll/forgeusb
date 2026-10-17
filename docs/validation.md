@@ -107,3 +107,13 @@ official wimlib1.14.4 source archive (SHA-256
 private temporary storage for tests; it is not bundled or globally installed.
 Current real Windows Setup, physical firmware, installed-helper destructive
 acceptance and native Debian/RPM package validation remain open.
+
+The native Arch package was built offline with normal dependency checks. Its
+75 source tests passed before the diagnostic-only remapping rebuild. The final
+17-file archive passed modes/ownership/type checks, helper protocol smoke and
+privacy inspection of every payload plus .PKGINFO/.BUILDINFO: no personal paths
+were found. Source and package SHA-256 plus per-file digests are recorded in
+development-validation.json. The remapped stripped CLI also passed the ordinary-
+file raw/corruption integration suite. No package was installed or published.
+An existing drm-fourcc upstream notice omission remains a redistribution review
+item; local package assembly is not full release/legal certification.

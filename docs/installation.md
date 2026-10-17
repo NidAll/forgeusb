@@ -114,3 +114,9 @@ request I/O. A matching application version string alone does not identify local
 engineering changes. Preparation/formatting remains unprivileged and can be used
 without installing the helper. The production-development pass built packages
 locally and did not replace the existing system installation.
+
+Release/package builds use `packaging/build.py` to remap personal home, project
+and Cargo source-cache prefixes. Existing compiler flags are preserved with
+Cargo's encoded argument separator, including paths containing spaces. This
+changes only the child build environment. Native package metadata must also be
+checked because stripping ELF debug sections does not remove every source path.

@@ -16,7 +16,8 @@ files or isolated virtual machines. No physical write is authorized.
 - [x] Improve portable packaging, dependency reporting and CI coverage.
 - [x] Run format, strict Clippy,75 workspace tests, release build, integration and GUI QA.
 - [x] Reconcile user-facing support claims, limitations and release blockers.
-- [ ] Integrate verified changes into the authoritative checkout and update lab records.
+- [x] Integrate verified changes into the authoritative checkout and update lab records.
+- [x] Finish inspection of the privacy-remapped native package.
 
 Windows-shaped fixtures prove image construction, file integrity and firmware
 handoff only. Windows Setup, genuine installation media, physical firmware and

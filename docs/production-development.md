@@ -73,6 +73,8 @@ publisher signature or current release authenticity check.
 6. GTK chooser/screen-reader acceptance, broad hardware QA and clean distribution
    build environments remain open. Debian/RPM recipes need a populated Cargo
    cache or vendored sources and have not been verified as native packages.
+   The existing drm-fourcc upstream license-notice omission also remains a
+   redistribution review item; local package assembly does not resolve it.
 
 These boundaries remain visible in the application modes and documentation.
 They must not be weakened to make a compatibility test appear successful.

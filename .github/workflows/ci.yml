@@ -64,6 +64,7 @@ jobs:
       - name: Validate installer staging and desktop integration
         run: |
           python3 tests/installation.py
+          python3 tests/build-environment.py
           python3 tests/source-package.py
           bash -n packaging/install.sh packaging/generate-icons.sh
 

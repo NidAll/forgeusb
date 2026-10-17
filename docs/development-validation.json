@@ -30,9 +30,9 @@
   ],
   "mandatory_media_tools": true,
   "binary_sha256": {
-    "forgeusb": "a123693170e91c931ce8cb196f90ec840d5a62a9998cf16599d0c11f7f5fcc87",
-    "forgeusb-gui": "4d5e2f5bba3cf95b9018268c90036469693971dfbde837b987491c21e920687b",
-    "forgeusb-helper": "b7ac4437ed1924cdb71ebe5a7a97ca1bb16de97123b3a09407f9f39f1ce926c3"
+    "forgeusb": "95feafb13bd2dcf087ddc4727554b0c021c6657496afb71b8ca19b487a2a411c",
+    "forgeusb-gui": "2786d88c195e4e0ed792b78330cff31f6c1c995280f82ab383d4eae7d148d12f",
+    "forgeusb-helper": "4254debc7bc831aa85c25b6f51ccbbd45291ddbe85d737497f16452d31359fbf"
   },
   "test_categories": {
     "raw_write_and_corruption": "passed final release",
@@ -49,7 +49,7 @@
       "new_publisher_authenticity_check": false
     },
     "installer": "17-file receipt and Makefile staging parity passed, including paths with spaces",
-    "arch_package": "native offline source build, standard dependency checks,75 mandatory-tool tests and17-file payload passed; final remapped/privacy-clean artifact pending",
+    "arch_package": "native offline package passed standard dependency checks,75 source tests,17-file payload/mode/owner validation,protocol smoke and final ELF/metadata privacy scan",
     "debian_rpm": "templates; native builds not verified",
     "gui_raw": "final GUI: native KDE chooser, minimum440x540 window, advanced properties and read-only preview passed; no target created"
   },
@@ -114,6 +114,46 @@
   },
   "helper_refusal_binary_smoke": "legacy/unknown protocols rejected; correct protocol refuses unprivileged execution; no request or device I/O",
   "workspace_tests_passed": 75,
-  "binary_sha256_scope": "isolated validation build before native package rebuild; artifact-specific hashes differ with build path/flags",
-  "release_privacy": "early candidates private; cached-dependency source paths found; remapped final artifact validation pending"
+  "binary_sha256_scope": "privacy-remapped native build, unstripped; package payload hashes identify stripped binaries separately",
+  "release_privacy": "passed actual final package: no personal paths in ELF payloads or package metadata",
+  "implementation_commit": "683453526ca77798cf689863856144f69fdd50e0",
+  "authoritative_main_integrated": true,
+  "workspace_test_evidence": "fresh-source native package check:75 passed, helper protocol regression present",
+  "release_build_wrapper_regression": "encoded/quoted flags, paths with spaces, child argument vector and parent environment isolation passed",
+  "native_package": {
+    "package": "forgeusb-0.1.0-1-x86_64.pkg.tar.zst",
+    "package_sha256": "b2488aca0400537f433a48733c0347b50b44de524fb2734af633a940740a98f2",
+    "source_archive_sha256": "b01cc28c0b02a26d65271bc0664680908c7e587db22ceea11d4e368d44bcf6cb",
+    "payload_files": 17,
+    "payload_sha256": {
+      "usr/bin/forgeusb": "6e44d899edbe2787e836735fb34a074acbbba7cbe13b2ac653158eb4c49bb488",
+      "usr/bin/forgeusb-gui": "79967738e239c13a2aad8521829f9b4b258103db59d7ca53bd3b46536dd17633",
+      "usr/lib/forgeusb/forgeusb-helper": "716e5f9eb0cc6c59fd11817c523591082d32894afef3c9350c6ba056a9439bf5",
+      "usr/share/applications/forgeusb.desktop": "42d39af6a05397f4afd14b50babd1dce491938ad323a0f125fe1ea71a920e492",
+      "usr/share/icons/hicolor/128x128/apps/forgeusb.png": "7181de61e0fdb6e1fae346aa9173d216de861b31e50d39116c6eb0c06901bc17",
+      "usr/share/icons/hicolor/16x16/apps/forgeusb.png": "ba2349700beaab79cbd98a7e9aa9e2fcbd291aa411a8cc40aee2c0e93e40b3da",
+      "usr/share/icons/hicolor/24x24/apps/forgeusb.png": "31078d9b734c2279eb88520e223ecf2546a76aac8ea62f56cdeda0d4cf86c822",
+      "usr/share/icons/hicolor/256x256/apps/forgeusb.png": "f637996db5629984be008b60fd5cfb2a1913a477b471b93914f39d2436ad1c82",
+      "usr/share/icons/hicolor/32x32/apps/forgeusb.png": "5b82af308fbf5387b5cde1dd940a94ed5274bc3f10b85912f442ca7ccf950d05",
+      "usr/share/icons/hicolor/48x48/apps/forgeusb.png": "e987a5bc9b52482085da916d339688f68801b1fae1cb20a14dcc0b32466633c3",
+      "usr/share/icons/hicolor/64x64/apps/forgeusb.png": "40436a072955b34d51dca20b3bb0fb0100ce741154a29cdae59d31214cf04560",
+      "usr/share/icons/hicolor/scalable/apps/forgeusb.svg": "3548ab5113253ed4e19eeaec05f64f880d8596a9ffb16a6c02bc6ca8f06a05d6",
+      "usr/share/licenses/forgeusb/LICENSE": "0b383d5a63da644f628d99c33976ea6487ed89aaa59f0b3257992deac1171e6b",
+      "usr/share/licenses/forgeusb/THIRD_PARTY_NOTICES.md": "ffc3e96038927afc521b8c1175130083fe54b4652b9941f0dd0071ca247112e6",
+      "usr/share/licenses/forgeusb/dependency-licenses.json": "a4840aede95fa14c006bc778f50eeb6606cb8669e2202bdf99faf2b8ba05763c",
+      "usr/share/licenses/forgeusb/third-party-licenses.txt": "7440858e52c7f5fbda6e995fc2ec38f72bd8469881261e87e157e47eb988e14e",
+      "usr/share/polkit-1/actions/io.forgeusb.write.policy": "a24cb4e6ab89779989c914820268da956c6844ba45c4790ec1897d92afe17335"
+    },
+    "root_owned_archive": true,
+    "safe_modes_types": true,
+    "personal_path_hits": {},
+    "elf_protocol_v2": true,
+    "helper_legacy_refused": true,
+    "workspace_tests": 75,
+    "remapped_build": "passed, offline; source tests passed before diagnostic-only remapping",
+    "redistribution_license_review": "drm-fourcc notice omission remains documented",
+    "final_packaged_cli_raw_corruption_suite": "passed",
+    "final_packaged_cli_synthetic_boots": 5,
+    "final_packaged_cli_boot_result": "all expected serial markers,exit33,unchanged images"
+  }
 }
