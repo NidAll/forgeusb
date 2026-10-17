@@ -49,7 +49,7 @@ enum Cmd {
         #[arg(long)]
         test_file: bool,
     },
-    /// Check fixed tool locations without installing or executing utilities.
+    /// Discover required/optional tools without installing or executing them.
     CheckDependencies,
     /// Inspect an already extracted Windows installer tree (no disk writes).
     InspectWindowsTree { tree: PathBuf },
@@ -60,7 +60,64 @@ enum Cmd {
         output: PathBuf,
         #[arg(long, default_value_t = 3600)]
         timeout_seconds: u64,
+        #[arg(long, default_value_t = 3800, value_parser = clap::value_parser!(u32).range(1..=3800))]
+        part_size_mib: u32,
     },
+    /// Prepare Windows ISO/tree as a NEW verified FAT32 disk image, without root or device access.
+    /// Then use plan/write to deploy it with the usual device safeguards.
+    PrepareWindows {
+        source: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_enum, default_value_t = PartitionScheme::Mbr)]
+        scheme: PartitionScheme,
+        /// Optional image capacity in MiB; otherwise sized to the payload.
+        #[arg(long)]
+        capacity_mib: Option<u64>,
+        #[arg(long, default_value_t = 3600)]
+        timeout_seconds: u64,
+    },
+    /// Create a NEW partitioned FAT32/NTFS regular disk image. No device access or bootloader installation.
+    FormatImage {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_enum)]
+        filesystem: FormatFilesystem,
+        #[arg(long, value_enum, default_value_t = PartitionScheme::Mbr)]
+        scheme: PartitionScheme,
+        #[arg(long)]
+        capacity_mib: u64,
+        #[arg(long, default_value = "FORGEUSB")]
+        label: String,
+        #[arg(long, default_value_t = 3600)]
+        timeout_seconds: u64,
+    },
+}
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum FormatFilesystem {
+    Fat32,
+    Ntfs,
+}
+impl From<FormatFilesystem> for forgeusb_filesystem::Filesystem {
+    fn from(value: FormatFilesystem) -> Self {
+        match value {
+            FormatFilesystem::Fat32 => Self::Fat32,
+            FormatFilesystem::Ntfs => Self::Ntfs,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum PartitionScheme {
+    Mbr,
+    Gpt,
+}
+impl From<PartitionScheme> for forgeusb_partition::Scheme {
+    fn from(value: PartitionScheme) -> Self {
+        match value {
+            PartitionScheme::Mbr => Self::Mbr,
+            PartitionScheme::Gpt => Self::Gpt,
+        }
+    }
 }
 fn show<T: serde::Serialize + std::fmt::Debug>(v: &T, json: bool) -> Result<()> {
     if json {
@@ -138,14 +195,64 @@ fn run(args: Args) -> Result<()> {
             source,
             output,
             timeout_seconds,
+            part_size_mib,
         } => {
-            let outputs = forgeusb_windows::split_wim(
+            let outputs = forgeusb_windows::split_wim_with_size(
                 &absolute(source)?,
                 &absolute(output)?,
                 &cancel,
                 std::time::Duration::from_secs(timeout_seconds),
+                part_size_mib,
             )?;
             show(&outputs, args.json)
+        }
+        Cmd::PrepareWindows {
+            source,
+            output,
+            scheme,
+            capacity_mib,
+            timeout_seconds,
+        } => {
+            let capacity_bytes = capacity_mib
+                .map(|value| value.checked_mul(1024 * 1024).context("capacity overflow"))
+                .transpose()?;
+            let report = forgeusb_media::build_windows_image(
+                &absolute(source)?,
+                &absolute(output)?,
+                &forgeusb_media::BuildOptions {
+                    scheme: scheme.into(),
+                    capacity_bytes,
+                    timeout: std::time::Duration::from_secs(timeout_seconds),
+                },
+                &cancel,
+                |p| event(p, false),
+            )?;
+            show(&report, args.json)
+        }
+        Cmd::FormatImage {
+            output,
+            filesystem,
+            scheme,
+            capacity_mib,
+            label,
+            timeout_seconds,
+        } => {
+            let capacity_bytes = capacity_mib
+                .checked_mul(1024 * 1024)
+                .context("capacity overflow")?;
+            let report = forgeusb_media::format_image(
+                &absolute(output)?,
+                &forgeusb_media::FormatOptions {
+                    filesystem: filesystem.into(),
+                    scheme: scheme.into(),
+                    capacity_bytes,
+                    label,
+                    timeout: std::time::Duration::from_secs(timeout_seconds),
+                },
+                &cancel,
+                |p| event(p, false),
+            )?;
+            show(&report, args.json)
         }
         Cmd::Verify {
             image,
@@ -237,7 +344,11 @@ fn privileged_write(
     let expected_hash = plan.image.sha256.clone();
     let mut child = Command::new("/usr/bin/pkexec")
         .arg(helper)
-        .args(["write", "--plan-json"])
+        .args([
+            "write",
+            "--plan-json",
+            forgeusb_linux::HELPER_PROTOCOL_ARGUMENT,
+        ])
         .env_clear()
         .env("PATH", "/usr/bin")
         .stdin(Stdio::piped())

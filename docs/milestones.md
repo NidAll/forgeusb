@@ -30,3 +30,19 @@ Validation: formatting, strict Clippy, 44 tests and release build passed. Instal
 ## USB discovery regression follow-up (2026-10-17)
 
 Fixed ENXIO from unavailable optional SCSI VPD identity attributes, preserving nearest-USB serial fallback and all required topology/admission checks. Successful GUI refresh now clears its discovery error independently and never restores stale confirmation. Added four regression tests; 48 total tests, format, Clippy and release build passed. Corrected build installed and validated against the user's Kingston USB using read-only enumeration/planning and GUI display only; no physical writes. See usb-detection.md.
+
+## Verified media-construction follow-up (2026-10-17)
+
+Windows preparation is now an implemented unprivileged ISO9660/UDF/tree to
+FAT32 MBR/GPT executor, with real WIM verification/splitting, private snapshots,
+file hashes, filesystem checks and atomic output. CLI `prepare-windows`, GUI
+Windows modes and ordinary-image FAT32/NTFS `format-image` are integrated with
+the existing raw writer. Stronger standalone GPT/source checks, bounded stale
+target-end GPT cleanup, original synthetic BIOS/UEFI suites, four filesystem
+combinations, real small WIM roundtrips and new packaging/CI checks are delivered.
+The early D/E staging/planner rows describe the superseded baseline.
+
+See [current report](production-development.md), [task ledger](development-plan.md)
+and [validation](validation.md) for evidence and release blockers. Genuine
+Windows installation, Windows BIOS/NTFS boot, physical firmware and Secure Boot
+are not promoted to validated support by synthetic fixtures.

@@ -19,3 +19,6 @@ ctrlc.workspace = true
 serde.workspace = true
 libc.workspace = true
 forgeusb-windows = { path = "../../crates/forgeusb-windows" }
+forgeusb-media = { path = "../../crates/forgeusb-media" }
+forgeusb-partition = { path = "../../crates/forgeusb-partition" }
+forgeusb-filesystem = { path = "../../crates/forgeusb-filesystem" }

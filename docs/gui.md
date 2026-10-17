@@ -2,6 +2,17 @@
 
 ForgeUSB uses a compact, plain dialog based on Rufus's original control order:
 **Drive Properties**, **Format Options**, **Status**, then **START / CLOSE**.
+
+The Image option now offers Windows FAT32/MBR and FAT32/GPT preparation modes.
+Both target UEFI. START builds and verifies a private installer image first,
+then displays the usual target review and exact confirmation. Preparation alone
+does not write a USB. It uses the user's cache filesystem (XDG_CACHE_HOME can
+select suitable disk-backed storage), requires 7z/7zz, dosfstools, mtools and
+wimlib, and can be cancelled. Disconnect/replacement during preparation clears
+device selection; cancellation also discards an already queued successful result.
+Windows-shaped fixtures validate this flow, not genuine Windows Setup or Secure
+Boot. See [Windows media](windows.md). `--mode windows-mbr|windows-gpt` selects
+the same mode when launching the GUI.
 The default is a 475 × 560 light window with square controls, a gray background,
 small system-style text, and no cards, banners or decorative branding. The
 window can be resized; extra properties scroll while progress and actions stay

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+python3 "$root/packaging/build.py" build --release --locked
+target_dir=${CARGO_TARGET_DIR:-target}
+if [[ $target_dir != /* ]]; then target_dir="$root/$target_dir"; fi
 output=${1:-"$root/dist"}
 mkdir -p -- "$output"
 output=$(cd -- "$output" && pwd -P)
@@ -9,11 +12,11 @@ trap 'rm -rf -- "$work"' EXIT
 bundle="$work/forgeusb-0.1.0-linux-x86_64"
 mkdir -p -- "$bundle/bin" "$bundle/licenses" "$bundle/packaging"
 for name in forgeusb forgeusb-gui; do
-    install -m755 -- "$root/target/release/$name" "$bundle/bin/$name"
+    install -m755 -- "$target_dir/release/$name" "$bundle/bin/$name"
 done
 # The helper and policy must be installed in trusted /usr paths by an administrator.
 # Never execute a bundled helper as root or change the application's fixed helper path.
-install -m755 -- "$root/target/release/forgeusb-helper" "$bundle/packaging/forgeusb-helper"
+install -m755 -- "$target_dir/release/forgeusb-helper" "$bundle/packaging/forgeusb-helper"
 install -m644 -- "$root/packaging/polkit/io.forgeusb.write.policy" "$bundle/packaging/"
 install -m644 -- "$root/LICENSE" "$root/THIRD_PARTY_NOTICES.md" "$root/docs/third-party-licenses.txt" "$root/docs/dependency-licenses.json" "$bundle/licenses/"
 cat > "$bundle/README.txt" <<'TEXT'

@@ -3,26 +3,35 @@ pkgname=forgeusb
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Native Linux USB image writer with explicit device safety and verification'
+url='https://github.com/NidAll/forgeusb'
 arch=('x86_64')
 license=('GPL-3.0-or-later')
 depends=('glibc' 'gcc-libs' 'util-linux' 'polkit' 'libxkbcommon' 'fontconfig')
-makedepends=('rust' 'cargo' 'make')
-optdepends=('wimlib: standalone unprivileged WIM staging' 'wayland: Wayland display session' 'libx11: X11 display session' 'kdialog: native KDE image chooser' 'zenity: fallback GTK image chooser')
+makedepends=('rust' 'cargo' 'make' 'pkgconf' 'python')
+optdepends=('dosfstools: FAT32 media creation' 'mtools: unprivileged FAT32 file copy and verification' '7zip: ISO/UDF installation media extraction' 'wimlib: Windows WIM splitting and validation' 'ntfs-3g: blank NTFS image formatting' 'wayland: Wayland display session' 'libx11: X11 display session' 'kdialog: native KDE image chooser' 'zenity: fallback GTK image chooser')
 source=("forgeusb-${pkgver}.tar.gz")
 # Updated to an exact SHA-256 by make-source-archive.sh in its generated recipe copy.
 sha256sums=('REGENERATE_WITH_MAKE_SOURCE_ARCHIVE')
 
+prepare() {
+  cd "${srcdir}/forgeusb-${pkgver}"
+  cargo fetch --locked --target x86_64-unknown-linux-gnu
+  # Reproducible archives carry fixed mtimes. Invalidate only workspace sources
+  # when a caller reuses CARGO_TARGET_DIR after extracting a newer archive.
+  find apps crates -type f -exec touch -- {} +
+}
+
 build() {
   cd "${srcdir}/forgeusb-${pkgver}"
-  cargo build --release --locked
+  python3 packaging/build.py build --release --locked --offline
 }
 
 check() {
   cd "${srcdir}/forgeusb-${pkgver}"
-  cargo test --workspace --locked
+  python3 packaging/build.py test --workspace --locked --offline
 }
 
 package() {
   cd "${srcdir}/forgeusb-${pkgver}"
-  make -f packaging/Makefile install DESTDIR="${pkgdir}"
+  make -f packaging/Makefile install DESTDIR="${pkgdir}" TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 }

@@ -8,26 +8,33 @@ BuildRequires:  cargo >= 1.88
 BuildRequires:  rust >= 1.88
 BuildRequires:  make
 BuildRequires:  gcc
+BuildRequires:  pkgconf-pkg-config
+BuildRequires:  python3
 Requires:       util-linux
 Requires:       polkit
 Requires:       libxkbcommon
 Requires:       fontconfig
-Suggests:       wimlib-utils
+Recommends:     dosfstools
+Recommends:     mtools
+Recommends:     7zip
+Recommends:     wimlib-utils
+Recommends:     ntfsprogs
 Suggests:       kdialog
 Suggests:       zenity
 
 %description
 Inspect, plan, write and verify raw images with explicit target confirmation.
-This development build does not create Windows installation media.
+Prepare FAT32 Windows UEFI media from installation trees or optical ISOs.
+WIM splitting avoids FAT32 file-size limits; no Microsoft files are bundled.
 
 %prep
 %autosetup
 
 %build
-cargo build --release --locked --offline
+python3 packaging/build.py build --release --locked --offline
 
 %check
-cargo test --workspace --locked --offline
+python3 packaging/build.py test --workspace --locked --offline
 
 %install
 make -f packaging/Makefile install DESTDIR=%{buildroot}

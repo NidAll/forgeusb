@@ -40,13 +40,13 @@ pub fn select_strategy(image: &ImageCapabilities, firmware: Firmware) -> Result<
         );
         ensure!(
             image.efi_fallback,
-            "Windows UEFI preparation requires a validated EFI fallback loader for the target architecture"
+            "Windows optical media must first be prepared with prepare-windows or the GUI Windows installer mode; raw copying cannot convert it. Preparation requires a validated EFI fallback loader for the target architecture"
         );
         return Ok(Strategy {
             id: if image.oversized_install_wim { "windows_fat32_split_wim" } else { "windows_fat32" }.into(),
             executable: false,
-            explanation: "Windows ISO media requires extraction and filesystem installation; only tree inspection and standalone WIM staging are currently available. No raw-write fallback is permitted.".into(),
-            verification: "Future executor must compare copied files, check split WIMs and architecture-specific EFI paths, then boot-test. No boot result is implied.".into(),
+            explanation: "Use prepare-windows or the GUI Windows installer mode to construct a verified FAT32 UEFI disk image, then review that image through the raw writer. Optical Windows media never falls back to raw copying.".into(),
+            verification: "Preparation verifies WIM resources, file hashes, FAT32 and partition metadata. Raw deployment verifies the complete prepared image; actual Windows Setup and firmware acceptance require separate validation.".into(),
         });
     }
     if image.disk_layout {

@@ -2,8 +2,8 @@
 %:
 	dh $@
 override_dh_auto_build:
-	cargo build --release --locked --offline
+	python3 packaging/build.py build --release --locked --offline
 override_dh_auto_test:
-	cargo test --workspace --locked --offline
+	python3 packaging/build.py test --workspace --locked --offline
 override_dh_auto_install:
 	$(MAKE) -f packaging/Makefile install DESTDIR=$(CURDIR)/debian/forgeusb

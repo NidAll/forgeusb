@@ -105,3 +105,12 @@ For Fedora, place the generated source archive in the RPM source directory, prov
 ## Portable distribution
 
 The release binary is locally portable only where its dynamic C/desktop dependencies are available. An AppImage/Flatpak is not produced. Raw USB privilege mediation and access to the system helper need a carefully reviewed host boundary, so a GUI bundle alone is insufficient. No claim of a single universal Linux binary is made.
+
+## Engineering-build helper compatibility
+
+Install the desktop, CLI and helper together from the same build. The current
+write contract uses `--protocol-v2`; mixed old/new clients and helpers fail before
+request I/O. A matching application version string alone does not identify local
+engineering changes. Preparation/formatting remains unprivileged and can be used
+without installing the helper. The production-development pass built packages
+locally and did not replace the existing system installation.

@@ -1,4 +1,4 @@
-//! Read-only partition layout planning. This module never opens a device.
+//! Partition planning and ordinary-file table construction. Never opens a device.
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -93,9 +93,23 @@ pub fn plan_uefi_fat32(capacity: u64, sector: u64, scheme: Scheme) -> Result<Lay
                 "0xef".into()
             },
         }],
-        explanation:
-            "One 1 MiB-aligned FAT32 EFI System Partition; installation is not implemented".into(),
+        explanation: "One 1 MiB-aligned FAT32 EFI System Partition; UEFI media, no BIOS boot code"
+            .into(),
     })
+}
+
+/// Plan one ordinary NTFS data partition; this does not install a boot loader.
+pub fn plan_ntfs(capacity: u64, sector: u64, scheme: Scheme) -> Result<Layout> {
+    let mut layout = plan_uefi_fat32(capacity, sector, scheme)?;
+    layout.partitions[0].filesystem = "ntfs".into();
+    layout.partitions[0].partition_type = if scheme == Scheme::Gpt {
+        "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7".into()
+    } else {
+        "0x07".into()
+    };
+    layout.explanation =
+        "One aligned NTFS data partition; no UEFI driver or BIOS bootstrap is installed".into();
+    Ok(layout)
 }
 
 #[cfg(test)]
@@ -127,3 +141,6 @@ mod tests {
         assert!(plan_uefi_fat32(4 * 1024 * 1024 * ALIGNMENT, 512, Scheme::Gpt).is_err());
     }
 }
+
+mod table;
+pub use table::{verify_partition_table, write_partition_table};

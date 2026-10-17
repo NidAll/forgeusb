@@ -2,14 +2,16 @@ Source: forgeusb
 Section: utils
 Priority: optional
 Maintainer: ForgeUSB contributors <maintainer@example.invalid>
-Build-Depends: debhelper-compat (= 13), cargo, rustc (>= 1.88), make, pkg-config
+Build-Depends: debhelper-compat (= 13), cargo, rustc (>= 1.88), make, pkg-config, python3
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 
 Package: forgeusb
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, util-linux, policykit-1, libxkbcommon0, libfontconfig1
-Suggests: wimtools, kdialog | zenity
+Depends: ${shlibs:Depends}, ${misc:Depends}, util-linux, polkitd, pkexec, libxkbcommon0, libfontconfig1
+Recommends: dosfstools, mtools, 7zip, wimtools, ntfs-3g
+Suggests: kdialog | zenity
 Description: Native Linux USB image writer
  Inspect, plan, write and verify raw images with explicit target confirmation.
- Windows installation-media creation is not yet implemented.
+ Prepare FAT32 Windows UEFI media from installation trees or optical ISOs.
+ WIM splitting avoids FAT32 file-size limits; no Microsoft files are bundled.

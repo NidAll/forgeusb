@@ -37,7 +37,9 @@ jobs:
             libx11-dev libx11-xcb-dev libxcb1-dev libxcb-randr0-dev \
             libxcb-xfixes0-dev libxcb-shape0-dev libxcursor-dev libxi-dev \
             libxrandr-dev libxinerama-dev libxfixes-dev fonts-dejavu-core \
-            util-linux fdisk dosfstools ntfs-3g xorriso xvfb xauth
+            util-linux fdisk dosfstools ntfs-3g xorriso mtools wimtools 7zip \
+            clang lld binutils qemu-system-x86 ovmf genisoimage \
+            imagemagick libxtst6 xvfb xauth
 
       - name: Install stable Rust, rustfmt, and Clippy
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -52,18 +54,33 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run unit tests
-        run: cargo test --workspace --locked
+        run: |
+          python3 tests/build-flags.py
+          env FORGEUSB_REQUIRE_MEDIA_TOOLS=1 python3 packaging/build.py test --workspace --locked
 
       - name: Build release binaries
-        run: cargo build --release --locked
+        run: python3 packaging/build.py build --release --locked
 
       - name: Validate installer staging and desktop integration
         run: |
           python3 tests/installation.py
+          python3 tests/source-package.py
           bash -n packaging/install.sh packaging/generate-icons.sh
 
       - name: Exercise write, verification, and corruption handling on owned files
         run: python3 tests/file-integration.py --cli target/release/forgeusb
+
+      - name: Validate FAT32 and NTFS formatting and partitioning on owned images
+        run: |
+          mkdir -p test-output
+          python3 tests/media-integration.py \
+            --cli target/release/forgeusb --output test-output/ci-formatted-media
+
+      - name: Boot synthetic BIOS, UEFI Windows-shaped, and ISOHybrid USB media
+        run: |
+          mkdir -p test-output
+          python3 tests/boot-integration.py \
+            --cli target/release/forgeusb --output test-output/ci-synthetic-boot
 
       - name: Smoke-test the native GUI under a private X server
         run: |
@@ -73,3 +90,10 @@ jobs:
             --binary target/release/forgeusb-gui \
             --source test-output/gui-smoke-source.img \
             --output-dir test-output/ci-gui-smoke
+
+      - name: Exercise Windows preparation and confirmed file writing through the GUI
+        run: |
+          python3 tests/gui-windows.py \
+            --binary target/release/forgeusb-gui --cli target/release/forgeusb \
+            --source test-output/ci-synthetic-boot/windows-shaped \
+            --output test-output/ci-windows-gui

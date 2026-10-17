@@ -1,4 +1,8 @@
 //! Shared read-only planner and raw-image operation engine for CLI and GUI.
+/// Fail closed when a desktop/CLI is paired with an older installed helper.
+/// Increment whenever the privileged execution contract or safety policy changes.
+pub const HELPER_PROTOCOL_ARGUMENT: &str = "--protocol-v2";
+
 use anyhow::{Context, Result, bail, ensure};
 use forgeusb_core::{Cancellation, Progress, Stage, capacity_check, progress};
 use forgeusb_device::Device;
@@ -83,7 +87,7 @@ fn plan_image(image: ImageInfo, target: &Path, test_file: bool) -> Result<Plan> 
     let mut warnings = image.warnings.clone();
     warnings.push(strategy.explanation.clone());
     warnings.push("Writing destroys existing target data. Cancellation can leave incomplete media. There is no rollback.".into());
-    warnings.push("Verification covers every source byte; device space beyond the source is preserved and is not verified. Firmware boot compatibility is inherited from the image and requires a boot test.".into());
+    warnings.push("Verification compares every source byte. On a larger physical target, any stale GPT backup header at the device end and its bounded entry array outside the image are cleared and read back separately; other unused space is preserved. Image GPT metadata is preserved, without relocation. Firmware compatibility requires a boot test.".into());
     let (target_kind, capacity, confirmation) = if test_file {
         ensure!(
             !target.starts_with("/dev")
@@ -119,6 +123,12 @@ fn plan_image(image: ImageInfo, target: &Path, test_file: bool) -> Result<Plan> 
             device.reasons.join("; ")
         );
         capacity_check(image.size, device.capacity)?;
+        ensure!(
+            image
+                .size
+                .is_multiple_of(device.identity.logical_sector_size as u64),
+            "raw image size must be a multiple of the target logical sector size"
+        );
         if unsafe { libc::geteuid() } != 0 {
             warnings.push("Device eligibility is preliminary in the desktop process. The privileged helper must complete system-wide namespace, mount and identity checks before any physical write; it may reject this plan.".into());
         }
@@ -246,6 +256,13 @@ pub fn execute_opened(
             "source content changed during write; target is incomplete"
         );
         source_matches(&source, &p.image)?;
+        let cleared = if matches!(p.target_kind, TargetKind::Block(_)) {
+            let regions = trailing_gpt_regions(&mut target, p.image.size, p.capacity)?;
+            clear_regions(&mut target, &regions, cancel)?;
+            regions
+        } else {
+            Vec::new()
+        };
         emit(progress(
             Stage::Flushing,
             at,
@@ -285,6 +302,7 @@ pub fn execute_opened(
             cancel,
             &mut emit,
         )?;
+        verify_cleared_regions(&mut target, &cleared, cancel)?;
         source_matches(&source, &p.image)?;
         if let TargetKind::Block(d) = &p.target_kind {
             forgeusb_device::revalidate(d)?;
@@ -293,7 +311,14 @@ pub fn execute_opened(
             Stage::Complete,
             v.bytes,
             p.image.size,
-            "Write and full source-length read-back verified",
+            if cleared.is_empty() {
+                "Write and full source-length read-back verified".to_owned()
+            } else {
+                format!(
+                    "Every source byte verified; {} stale GPT metadata bytes separately cleared and verified",
+                    cleared.iter().map(|r| r.end - r.start).sum::<u64>()
+                )
+            },
         ));
         Ok(Report {
             bytes: v.bytes,
@@ -353,21 +378,149 @@ pub fn verify(
         verified: true,
     })
 }
-/// Check tools by fixed absolute paths. No shell or PATH resolution.
+/// Find only backup GPT metadata outside the copied image. A stale header at
+/// the physical device end can otherwise override the newly written MBR on
+/// firmware or partitioning tools. Never relocate or modify image metadata.
+fn trailing_gpt_regions<T: Read + Seek>(
+    target: &mut T,
+    image_size: u64,
+    capacity: u64,
+) -> Result<Vec<std::ops::Range<u64>>> {
+    if capacity < 512 || !capacity.is_multiple_of(512) || image_size > capacity - 512 {
+        return Ok(Vec::new());
+    }
+    let header_start = capacity - 512;
+    target.seek(SeekFrom::Start(header_start))?;
+    let mut h = [0u8; 512];
+    target
+        .read_exact(&mut h)
+        .context("read target-end GPT signature before cleanup")?;
+    if &h[..8] != b"EFI PART" {
+        return Ok(Vec::new());
+    }
+    let mut regions = Vec::with_capacity(2);
+    regions.push(header_start..capacity);
+    let u32_at = |o: usize| u32::from_le_bytes(h[o..o + 4].try_into().expect("GPT fixed slice"));
+    let u64_at = |o: usize| u64::from_le_bytes(h[o..o + 8].try_into().expect("GPT fixed slice"));
+    let len = u32_at(12) as usize;
+    let crc = u32_at(16);
+    let table = u64_at(72).checked_mul(512);
+    let bytes = (u32_at(80) as u64).checked_mul(u32_at(84) as u64);
+    let entry = u32_at(84);
+    let sane_header = (92..=512).contains(&len)
+        && u64_at(24) == capacity / 512 - 1
+        && entry >= 128
+        && entry.is_multiple_of(8);
+    h[16..20].fill(0);
+    // Invalid metadata cannot authorize wiping arbitrary extents: invalidate
+    // only the recognizable final header if its CRC or bounds cannot be trusted.
+    if sane_header
+        && crc32fast::hash(&h[..len]) == crc
+        && let (Some(start), Some(bytes)) = (table, bytes)
+        && bytes > 0
+        && bytes <= 1024 * 1024
+        && start >= image_size
+        && let Some(end) = start.checked_add(bytes)
+        && end <= header_start
+    {
+        regions.push(start..end);
+    }
+    Ok(regions)
+}
+fn clear_regions<T: Write + Seek>(
+    target: &mut T,
+    regions: &[std::ops::Range<u64>],
+    cancel: &Cancellation,
+) -> Result<()> {
+    let zeros = [0u8; 64 * 1024];
+    for region in regions {
+        target.seek(SeekFrom::Start(region.start))?;
+        let mut left = region.end - region.start;
+        while left > 0 {
+            cancel.check()?;
+            let n = left.min(zeros.len() as u64) as usize;
+            target
+                .write_all(&zeros[..n])
+                .context("clear stale target-end GPT metadata")?;
+            left -= n as u64;
+        }
+    }
+    Ok(())
+}
+fn verify_cleared_regions<T: Read + Seek>(
+    target: &mut T,
+    regions: &[std::ops::Range<u64>],
+    cancel: &Cancellation,
+) -> Result<()> {
+    let mut buffer = [0u8; 64 * 1024];
+    for region in regions {
+        target.seek(SeekFrom::Start(region.start))?;
+        let mut left = region.end - region.start;
+        while left > 0 {
+            cancel.check()?;
+            let n = left.min(buffer.len() as u64) as usize;
+            target
+                .read_exact(&mut buffer[..n])
+                .context("read back cleared GPT metadata")?;
+            ensure!(
+                buffer[..n].iter().all(|&b| b == 0),
+                "stale GPT metadata cleanup failed read-back verification"
+            );
+            left -= n as u64;
+        }
+    }
+    Ok(())
+}
+fn tool_in(name: &str, paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().map(|dir| dir.join(name)).find(|path| {
+        path.metadata()
+            .is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0)
+    })
+}
+/// Read-only dependency reporting. Resolve unprivileged tools through PATH for
+/// distro portability; this function never executes any discovered tool. Root
+/// reporting uses trusted system directories and the helper stays fixed-path.
 pub fn dependencies() -> serde_json::Value {
+    let dirs: Vec<_> = if unsafe { libc::geteuid() } == 0 {
+        ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+            .map(PathBuf::from)
+            .into()
+    } else {
+        std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default()
+    };
     let tools = [
-        ("lsblk", "/usr/bin/lsblk"),
-        ("udisksctl", "/usr/bin/udisksctl"),
-        ("pkexec", "/usr/bin/pkexec"),
+        ("lsblk", "lsblk"),
+        ("udisksctl", "udisksctl"),
+        ("pkexec", "pkexec"),
         ("helper", "/usr/lib/forgeusb/forgeusb-helper"),
-        ("sfdisk", "/usr/bin/sfdisk"),
-        ("mkfs.fat", "/usr/bin/mkfs.fat"),
-        ("mkfs.ntfs", "/usr/bin/mkfs.ntfs"),
-        ("wimlib-imagex", "/usr/bin/wimlib-imagex"),
-        ("xorriso", "/usr/bin/xorriso"),
-        ("qemu", "/usr/bin/qemu-system-x86_64"),
+        ("sfdisk", "sfdisk"),
+        ("mkfs.fat", "mkfs.fat"),
+        ("mkfs.ntfs", "mkfs.ntfs"),
+        ("wimlib-imagex", "wimlib-imagex"),
+        ("7z", "7z"),
+        ("7zz", "7zz"),
+        ("mcopy", "mcopy"),
+        ("mmd", "mmd"),
+        ("fsck.fat", "fsck.fat"),
+        ("ntfsfix", "ntfsfix"),
+        ("xorriso", "xorriso"),
+        ("qemu", "qemu-system-x86_64"),
     ];
-    serde_json::json!(tools.into_iter().map(|(name,path)|serde_json::json!({"name":name,"path":path,"installed":Path::new(path).is_file()})).collect::<Vec<_>>())
+    serde_json::json!(
+        tools
+            .into_iter()
+            .map(|(name, command)| {
+                let path = if command.starts_with('/') {
+                    tool_in(command, [PathBuf::new()])
+                } else {
+                    tool_in(command, dirs.clone())
+                };
+                serde_json::json!({"name": name, "installed": path.is_some(), "path": path})
+            })
+            .collect::<Vec<_>>()
+    )
 }
 #[cfg(test)]
 mod tests {
@@ -383,6 +536,178 @@ mod tests {
         bytes[1000] = 42;
         fs::write(&p, bytes).unwrap();
         p
+    }
+    fn stale_gpt_fixture() -> std::io::Cursor<Vec<u8>> {
+        let mut bytes = vec![0xa5; 1024 * 1024];
+        let capacity = bytes.len();
+        let h = &mut bytes[capacity - 512..];
+        h.fill(0);
+        h[..8].copy_from_slice(b"EFI PART");
+        h[12..16].copy_from_slice(&92u32.to_le_bytes());
+        h[24..32].copy_from_slice(&(capacity as u64 / 512 - 1).to_le_bytes());
+        h[72..80].copy_from_slice(&(capacity as u64 / 512 - 33).to_le_bytes());
+        h[80..84].copy_from_slice(&128u32.to_le_bytes());
+        h[84..88].copy_from_slice(&128u32.to_le_bytes());
+        let crc = crc32fast::hash(&h[..92]);
+        h[16..20].copy_from_slice(&crc.to_le_bytes());
+        std::io::Cursor::new(bytes)
+    }
+    #[test]
+    fn stale_backup_cleanup_preserves_source_and_checks_cleared_metadata() {
+        let mut target = stale_gpt_fixture();
+        let original = target.get_ref().clone();
+        let capacity = original.len() as u64;
+        let image_size = 256 * 1024;
+        let regions = trailing_gpt_regions(&mut target, image_size, capacity).unwrap();
+        assert_eq!(
+            regions,
+            [
+                capacity - 512..capacity,
+                capacity - 33 * 512..capacity - 512
+            ]
+        );
+        let cancel = Cancellation::default();
+        clear_regions(&mut target, &regions, &cancel).unwrap();
+        verify_cleared_regions(&mut target, &regions, &cancel).unwrap();
+        assert_eq!(
+            &target.get_ref()[..capacity as usize - 33 * 512],
+            &original[..capacity as usize - 33 * 512]
+        );
+        target.get_mut()[capacity as usize - 1] = 1;
+        assert!(verify_cleared_regions(&mut target, &regions, &cancel).is_err());
+    }
+    #[test]
+    fn malformed_or_overlapping_old_gpt_cannot_expand_cleanup() {
+        let mut target = stale_gpt_fixture();
+        let capacity = target.get_ref().len() as u64;
+        let header_start = capacity - 512;
+        // No metadata bytes inside the source may be changed, even when a
+        // valid old header points its entry array into the copied image.
+        assert_eq!(
+            trailing_gpt_regions(&mut target, capacity - 16 * 512, capacity).unwrap(),
+            std::slice::from_ref(&(header_start..capacity))
+        );
+        assert!(
+            trailing_gpt_regions(&mut target, capacity, capacity)
+                .unwrap()
+                .is_empty()
+        );
+        let h = &mut target.get_mut()[header_start as usize..];
+        h[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            trailing_gpt_regions(&mut target, 512, capacity).unwrap(),
+            std::slice::from_ref(&(header_start..capacity))
+        );
+        target.get_mut()[header_start as usize] = 0;
+        assert!(
+            trailing_gpt_regions(&mut target, 512, capacity)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            trailing_gpt_regions(&mut std::io::Cursor::new([]), 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn cleanup_obeys_cancellation_before_mutating_target() {
+        let mut target = stale_gpt_fixture();
+        let original = target.get_ref().clone();
+        let capacity = original.len() as u64;
+        let regions = trailing_gpt_regions(&mut target, 512, capacity).unwrap();
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert!(clear_regions(&mut target, &regions, &cancel).is_err());
+        assert_eq!(*target.get_ref(), original);
+    }
+    #[test]
+    fn dependency_reporting_finds_executable_in_distro_specific_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("sfdisk");
+        fs::write(&tool, "fixture; never executed").unwrap();
+        assert!(tool_in("sfdisk", [dir.path().to_owned()]).is_none());
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(tool_in("sfdisk", [dir.path().to_owned()]), Some(tool));
+    }
+    #[test]
+    fn modified_serialized_plan_never_creates_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = fixture(dir.path());
+        let target = dir.path().join("new.img");
+        let plan = plan(&source, &target, true).unwrap();
+        for mutate in [
+            |p: &mut Plan| p.image.sha256 = "0".repeat(64),
+            |p: &mut Plan| p.capacity += 512,
+            |p: &mut Plan| p.strategy = "untrusted".into(),
+            |p: &mut Plan| p.confirmation = "forged approval".into(),
+        ] {
+            let mut modified = plan.clone();
+            mutate(&mut modified);
+            assert!(
+                execute(
+                    &modified,
+                    &modified.confirmation,
+                    &Cancellation::default(),
+                    |_| {}
+                )
+                .is_err()
+            );
+            assert!(!target.exists());
+        }
+    }
+    #[test]
+    fn retained_source_descriptor_survives_parent_path_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("original");
+        fs::create_dir(&source_dir).unwrap();
+        let source_path = fixture(&source_dir);
+        let target = dir.path().join("new.img");
+        let plan = plan(&source_path, &target, true).unwrap();
+        let source = open_source(&source_path).unwrap();
+        let retained_dir = dir.path().join("retained");
+        fs::rename(&source_dir, &retained_dir).unwrap();
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(&source_path, vec![0u8; plan.image.size as usize]).unwrap();
+        assert!(
+            execute_opened(
+                &plan,
+                &plan.confirmation,
+                source,
+                &Cancellation::default(),
+                |_| {}
+            )
+            .unwrap()
+            .verified
+        );
+        assert_eq!(
+            fs::read(target).unwrap(),
+            fs::read(retained_dir.join("source.img")).unwrap()
+        );
+    }
+    #[test]
+    fn source_content_change_mid_write_never_reports_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = fixture(dir.path());
+        let target = dir.path().join("new.img");
+        let plan = plan(&source, &target, true).unwrap();
+        let mut modified = false;
+        let result = execute(
+            &plan,
+            &plan.confirmation,
+            &Cancellation::default(),
+            |event| {
+                if event.stage == Stage::Writing && !modified {
+                    modified = true;
+                    let mut file = OpenOptions::new().write(true).open(&source).unwrap();
+                    file.seek(SeekFrom::Start(1024 * 1024 + 1000)).unwrap();
+                    file.write_all(&[99]).unwrap();
+                }
+            },
+        );
+        assert!(modified);
+        assert!(result.unwrap_err().to_string().contains("partial data"));
     }
     #[test]
     fn full_write_readback_and_no_overwrite() {

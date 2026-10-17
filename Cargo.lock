@@ -795,8 +795,11 @@ dependencies = [
  "ctrlc",
  "forgeusb-core",
  "forgeusb-device",
+ "forgeusb-filesystem",
  "forgeusb-image",
  "forgeusb-linux",
+ "forgeusb-media",
+ "forgeusb-partition",
  "forgeusb-windows",
  "libc",
  "serde",
@@ -842,9 +845,12 @@ dependencies = [
  "forgeusb-device",
  "forgeusb-image",
  "forgeusb-linux",
+ "forgeusb-media",
+ "forgeusb-partition",
  "iced",
  "libc",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -866,11 +872,28 @@ name = "forgeusb-linux"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crc32fast",
  "forgeusb-boot",
  "forgeusb-core",
  "forgeusb-device",
  "forgeusb-image",
  "forgeusb-verify",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "forgeusb-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "forgeusb-core",
+ "forgeusb-filesystem",
+ "forgeusb-partition",
+ "forgeusb-windows",
  "libc",
  "serde",
  "serde_json",

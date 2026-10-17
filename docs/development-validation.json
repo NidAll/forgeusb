@@ -1,0 +1,119 @@
+{
+  "date": "2026-10-17",
+  "baseline_commit": "a789c24882256c2c78a081912e613956beb3905e",
+  "application_version": "0.1.0",
+  "status": "engineering build; not production certified",
+  "rustc": "1.99.0",
+  "cargo": "1.99.0",
+  "gates": [
+    {
+      "check": "format",
+      "exit_code": 0,
+      "seconds": 0.11
+    },
+    {
+      "check": "clippy",
+      "exit_code": 0,
+      "seconds": 1.92
+    },
+    {
+      "check": "unit",
+      "exit_code": 0,
+      "seconds": 72.79,
+      "tests_passed": 74
+    },
+    {
+      "check": "release",
+      "exit_code": 0,
+      "seconds": 31.4
+    }
+  ],
+  "mandatory_media_tools": true,
+  "binary_sha256": {
+    "forgeusb": "a123693170e91c931ce8cb196f90ec840d5a62a9998cf16599d0c11f7f5fcc87",
+    "forgeusb-gui": "4d5e2f5bba3cf95b9018268c90036469693971dfbde837b987491c21e920687b",
+    "forgeusb-helper": "b7ac4437ed1924cdb71ebe5a7a97ca1bb16de97123b3a09407f9f39f1ce926c3"
+  },
+  "test_categories": {
+    "raw_write_and_corruption": "passed final release",
+    "formatting": "four final-release MBR/GPT x FAT32/NTFS variants passed with independent metadata/header/digest and refusal checks",
+    "synthetic_boot": "five final-release BIOS/UEFI paths passed; exact serial markers and exit33, immutable image hashes",
+    "real_wim": "small capture, multipart split, verify, apply and exact restored payload; actual UDF and ISO9660 preparation passed",
+    "gui_windows": "protocol-v2 release: private Xvfb preparation, exact confirmation,320MiB new-file write/full readback and independent CLI verification passed",
+    "alpine": {
+      "bytes": 69206016,
+      "sha256": "3ab424762af704b2c2a9e57df1dc37f982af260071504d977f2fb96822e7130b",
+      "bios": "localhost login",
+      "uefi": "localhost login",
+      "new_iso_download": false,
+      "new_publisher_authenticity_check": false
+    },
+    "installer": "17-file receipt and Makefile staging parity passed, including paths with spaces",
+    "arch_package": "native offline source build, standard dependency checks,75 mandatory-tool tests and17-file payload passed; final remapped/privacy-clean artifact pending",
+    "debian_rpm": "templates; native builds not verified",
+    "gui_raw": "final GUI: native KDE chooser, minimum440x540 window, advanced properties and read-only preview passed; no target created"
+  },
+  "safety": {
+    "physical_writes": 0,
+    "mounts": 0,
+    "loop_devices": 0,
+    "root_gui": false,
+    "global_installation": false,
+    "remote_publication": false,
+    "large_iso_downloads": 0,
+    "vm_network": false
+  },
+  "test_tool_source": {
+    "name": "wimlib",
+    "version": "1.14.4",
+    "source_url": "https://wimlib.net/downloads/wimlib-1.14.4.tar.gz",
+    "archive_sha256": "3633db2b6c8b255eb86d3bf3df3059796bd1f08e50b8c9728c7eb66662e51300",
+    "global_installation": false,
+    "bundled": false
+  },
+  "unverified_or_unsupported": [
+    "genuine Windows 10/11 Setup and installation completion",
+    "actual larger-than-4GiB Windows WIM installation",
+    "Windows BIOS and NTFS/UEFI:NTFS boot construction",
+    "Secure Boot signature, db/dbx/SBAT and revocation acceptance",
+    "physical USB, installed helper destructive acceptance, unplug and hardware fault behavior",
+    "CachyOS and problematic physical firmware boot",
+    "source GPT relocation and kernel partition table refresh",
+    "generic Linux extraction, persistence, compressed writing and UDisks removal",
+    "GTK chooser/accessibility and native Debian/RPM builds"
+  ],
+  "integration_gates": [
+    {
+      "check": "protocol-v2-raw",
+      "exit_code": 0,
+      "seconds": 4.32
+    },
+    {
+      "check": "protocol-v2-media",
+      "exit_code": 0,
+      "seconds": 25.67
+    },
+    {
+      "check": "protocol-v2-boot",
+      "exit_code": 0,
+      "seconds": 19.66
+    },
+    {
+      "check": "protocol-v2-install",
+      "exit_code": 0,
+      "seconds": 0.62
+    }
+  ],
+  "helper_protocol": "--protocol-v2",
+  "mixed_helper_versions": "rejected before request I/O; no legacy fallback",
+  "protocol_followup": {
+    "strict_workspace_clippy": "passed",
+    "affected_gui_linux_helper_tests": 23,
+    "new_helper_protocol_tests": 1,
+    "locked_release_build": "passed"
+  },
+  "helper_refusal_binary_smoke": "legacy/unknown protocols rejected; correct protocol refuses unprivileged execution; no request or device I/O",
+  "workspace_tests_passed": 75,
+  "binary_sha256_scope": "isolated validation build before native package rebuild; artifact-specific hashes differ with build path/flags",
+  "release_privacy": "early candidates private; cached-dependency source paths found; remapped final artifact validation pending"
+}

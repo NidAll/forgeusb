@@ -25,11 +25,19 @@ fn groups() -> Result<Vec<libc::gid_t>> {
     );
     Ok(groups)
 }
-fn run() -> Result<()> {
+fn validate_invocation(args: &[String]) -> Result<()> {
     ensure!(
-        std::env::args().skip(1).collect::<Vec<_>>() == ["write", "--plan-json"],
-        "usage: forgeusb-helper write --plan-json (one JSON request on stdin)"
+        args == [
+            "write",
+            "--plan-json",
+            forgeusb_linux::HELPER_PROTOCOL_ARGUMENT
+        ],
+        "helper protocol mismatch: install the matching ForgeUSB app and helper; usage: forgeusb-helper write --plan-json --protocol-v2 (one JSON request on stdin)"
     );
+    Ok(())
+}
+fn run() -> Result<()> {
+    validate_invocation(&std::env::args().skip(1).collect::<Vec<_>>())?;
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "helper requires Polkit authorization"
@@ -134,5 +142,31 @@ fn main() {
     if let Err(e) = run() {
         emit(HelperEvent::Error(format!("{e:#}")));
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn helper_rejects_legacy_and_unknown_protocols_before_request_io() {
+        for args in [
+            vec!["write", "--plan-json"],
+            vec!["write", "--plan-json", "--protocol-v1"],
+            vec!["write", "--plan-json", "--protocol-v3"],
+        ] {
+            assert!(
+                validate_invocation(&args.into_iter().map(str::to_owned).collect::<Vec<_>>())
+                    .is_err()
+            );
+        }
+        assert!(
+            validate_invocation(&[
+                "write".into(),
+                "--plan-json".into(),
+                forgeusb_linux::HELPER_PROTOCOL_ARGUMENT.into()
+            ])
+            .is_ok()
+        );
     }
 }

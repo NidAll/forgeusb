@@ -16,3 +16,6 @@ forgeusb-core = { path = "../../crates/forgeusb-core" }
 forgeusb-device = { path = "../../crates/forgeusb-device" }
 forgeusb-image = { path = "../../crates/forgeusb-image" }
 forgeusb-linux = { path = "../../crates/forgeusb-linux" }
+forgeusb-media = { path = "../../crates/forgeusb-media" }
+forgeusb-partition = { path = "../../crates/forgeusb-partition" }
+tempfile.workspace = true

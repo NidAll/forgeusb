@@ -499,6 +499,13 @@
       "source": null
     },
     {
+      "name": "forgeusb-media",
+      "version": "0.1.0",
+      "license": "GPL-3.0-or-later",
+      "license_file": null,
+      "source": null
+    },
+    {
       "name": "forgeusb-partition",
       "version": "0.1.0",
       "license": "GPL-3.0-or-later",

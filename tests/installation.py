@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -17,8 +18,8 @@ def main():
     assert os.geteuid() != 0, 'run installer tests unprivileged'
     with tempfile.TemporaryDirectory(prefix='forgeusb-install-test-') as temporary:
         stage = Path(temporary) / 'stage'
-        command = ['/usr/bin/bash', str(ROOT / 'packaging/install.sh'), '--no-build', '--stage', str(stage)]
-        first = subprocess.run(command, capture_output=True, text=True)
+        command = [shutil.which('bash'), str(ROOT / 'packaging/install.sh'), '--no-build', '--stage', str(stage)]
+        first = subprocess.run(command, capture_output=True, text=True, timeout=60)
         assert first.returncode == 0, first.stderr
         prefix = stage / 'usr'
         receipt = json.loads((prefix / 'share/forgeusb/install-receipt.json').read_text())
@@ -36,11 +37,28 @@ def main():
         ET.parse(prefix / 'share/polkit-1/actions/io.forgeusb.write.policy')
         desktop = (prefix / 'share/applications/forgeusb.desktop').read_text()
         assert 'Icon=forgeusb\n' in desktop and 'StartupWMClass=forgeusb\n' in desktop
-        again = subprocess.run(command, capture_output=True, text=True)
+        # Distro packaging uses the Makefile, not install.py. Verify it installs
+        # the exact same approved payload, without activating a helper or policy.
+        package_stage = Path(temporary) / 'package stage with spaces'
+        shared_target = Path(temporary) / 'shared target with spaces'
+        shared_target.symlink_to(ROOT / 'target', target_is_directory=True)
+        package = subprocess.run([shutil.which('make'), '-f', 'packaging/Makefile', 'install',
+                                  f'DESTDIR={package_stage}', f'TARGET_DIR={shared_target}'], cwd=ROOT, capture_output=True,
+                                 text=True, timeout=60)
+        assert package.returncode == 0, package.stderr
+        package_prefix = package_stage / 'usr'
+        package_files = {str(path.relative_to(package_prefix)) for path in package_prefix.rglob('*') if path.is_file()}
+        assert package_files == set(receipt['files']), package_files
+        for relative, digest in receipt['files'].items():
+            path = package_prefix / relative
+            assert not path.is_symlink()
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+            assert stat.S_IMODE(path.stat().st_mode) == (0o755 if relative.startswith(('bin/', 'lib/')) else 0o644)
+        again = subprocess.run(command, capture_output=True, text=True, timeout=60)
         assert again.returncode != 0 and 'existing staging trees are never overwritten' in again.stderr
         symlink = Path(temporary) / 'linked-stage'
         symlink.symlink_to(stage, target_is_directory=True)
-        linked = subprocess.run([*command[:-1], str(symlink)], capture_output=True, text=True)
+        linked = subprocess.run([*command[:-1], str(symlink)], capture_output=True, text=True, timeout=60)
         assert linked.returncode != 0
         assert hashlib.sha256((prefix / 'bin/forgeusb-gui').read_bytes()).hexdigest() == receipt['files']['bin/forgeusb-gui']
         spec = importlib.util.spec_from_file_location('forgeusb_installer', ROOT / 'packaging/install.py')
@@ -63,6 +81,7 @@ def main():
         assert all(not (user_prefix / path).exists() for path in payload)
         assert not (user_prefix / installer.RECEIPT).exists()
         print(json.dumps({'ok': True, 'staged_files': len(receipt['files']), 'png_sizes': 7,
+                          'distro_package_payload_matches_installer': True,
                           'existing_destination_refused': True, 'symlink_destination_refused': True,
                           'changed_file_uninstall_refused': True, 'receipt_matched_uninstall': True,
                           'elevation': False, 'physical_writes': 0}))

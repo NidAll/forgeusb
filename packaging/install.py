@@ -207,10 +207,8 @@ def main() -> None:
                 run([elevation, '/usr/bin/python3', str(worker), '--remove-system'])
         return
     if not args.no_build:
-        cargo = shutil.which('cargo')
-        if not cargo:
-            raise RuntimeError('Install the stable Rust toolchain first; cargo was not found')
-        subprocess.run([cargo, 'build', '--release', '--locked'], cwd=ROOT, check=True)
+        subprocess.run([sys.executable, str(ROOT / 'packaging/build.py'),
+                        'build', '--release', '--locked'], cwd=ROOT, check=True)
     payload = {path: read_regular(source) for path, (source, _) in files(system).items()}
     for path in ['bin/forgeusb', 'bin/forgeusb-gui'] + (['lib/forgeusb/forgeusb-helper'] if system else []):
         if not payload[Path(path)].startswith(b'\x7fELF'):

@@ -56,3 +56,54 @@ The installed CLI passed the disposable-file FAT32/NTFS, MBR/GPT, read-back, cor
 Reproduced a real Kingston DataTraveler 3.0 discovery failure: SCSI serial/WWID attributes returned ENXIO despite a readable USB-device serial. Corrected the optional-attribute handling and cleared stale GUI discovery errors independently of operation errors. Four regression tests bring the workspace total to 48; formatting, strict Clippy and locked release build passed. The corrected binaries/helper were installed with the existing authorized installer and every installed hash was verified.
 
 Live read-only enumeration finds the 61,872,793,600-byte USB as eligible while retaining system-disk refusal. A genuinely read-only physical-target plan passed, with no typed confirmation submitted or write started. The installed GUI screenshot shows one USB, READY and no automatic selection/error. Details and exact evidence limits: [USB discovery regression](usb-detection.md) and [structured results](usb-detection-validation.json). No physical writes or loop devices.
+
+## Windows media, formatting and safety development (2026-10-17)
+
+This pass adds the verified preparation executor described in
+[Windows media](windows.md), with the final support boundary in
+[production-development.md](production-development.md). It supersedes the earlier
+staging-only Windows and planner-only filesystem descriptions above. The
+[structured results](development-validation.json) distinguish each evidence class.
+
+Final formatting, strict all-target workspace Clippy, **75 workspace tests** and
+the locked release build passed. The unit run required all media tools; no
+external-tool fixture was silently skipped.
+
+Validation includes mandatory external-tool unit coverage (tiny genuine WIM
+containers and multipart capture/split/verify/apply with original payload hashes),
+ISO9660 and actual UDF extraction, MBR/GPT partition CRC/read-back, per-file FAT32
+SHA-256, cancellation before publication and refusal cases. `format-image` passed
+MBR/GPT × FAT32/NTFS checks, independent sfdisk metadata, full raw writes/read-back,
+no-clobber, invalid geometry/label/overflow/deadline and symlink refusal.
+
+Five original synthetic fixtures booted through actual ForgeUSB CLI preparation,
+plan, write and verify: BIOS disk, Windows-shaped MBR/FAT32 UEFI, optical-ISO to
+Windows-shaped GPT/FAT32 UEFI, and appended-ESP GPT ISOHybrid under BIOS and UEFI.
+Expected serial markers and QEMU exit33 were required; media hashes stayed
+unchanged. Tests disable networking, use read-only USB images and fresh OVMF
+variables. BCD/bootmgr are explicitly synthetic placeholders; boot/install WIMs
+contain ordinary test text, not Windows.
+
+The retained 69,206,016-byte Alpine virt3.24.2 ISO (SHA-256
+`3ab424762af704b2c2a9e57df1dc37f982af260071504d977f2fb96822e7130b`) was copied and
+verified using the new writer, then reached **localhost login** under SeaBIOS and
+OVMF. The original acquisition hash is reused; this is not a new publisher
+signature validation. Real Alpine exposed an intentional ISOHybrid LBA0 GPT
+partition that the initial tightened parser wrongly refused. The correction is
+regression-tested while standalone GPT validation remains strict.
+
+The actual unprivileged GUI Windows workflow prepared a private image, displayed
+a review before target creation, accepted exact typed confirmation, wrote and
+verified a new 320MiB ordinary file, and passed independent CLI verification.
+Its private-Xvfb screenshots were inspected locally. Extra GUI tests cover mode
+changes, cancellation winning over queued completion, device replacement during
+preparation and source hash continuity. Existing raw GUI/native chooser smoke
+and installer/source-package checks remain part of final validation.
+
+No physical device writes, mounts, loops, root GUI, global tool installations,
+large ISO downloads, remote publication or Secure Boot tests occurred. A small
+official wimlib1.14.4 source archive (SHA-256
+`3633db2b6c8b255eb86d3bf3df3059796bd1f08e50b8c9728c7eb66662e51300`) was built in
+private temporary storage for tests; it is not bundled or globally installed.
+Current real Windows Setup, physical firmware, installed-helper destructive
+acceptance and native Debian/RPM package validation remain open.

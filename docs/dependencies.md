@@ -4,7 +4,7 @@ ForgeUSB source is GPL-3.0-or-later. Rufus/WoeUSB source was studied to understa
 
 ## Direct Rust dependencies
 
-Actual selected versions belong to `Cargo.lock`; this table lists license families from upstream package metadata. Release builders must export the resolved Cargo metadata/license inventory for every distributed target, including transitive crates, before redistribution. The included inventory covers x86_64-unknown-linux-gnu and development dependencies: 222 packages, of which 210 are registry crates; no license field was missing at generation time. Do not infer complete compliance from this abbreviated table.
+Actual selected versions belong to `Cargo.lock`; this table lists license families from upstream package metadata. Release builders must export the resolved Cargo metadata/license inventory for every distributed target, including transitive crates, before redistribution. The included inventory covers x86_64-unknown-linux-gnu and development dependencies: 223 packages, of which 210 are registry crates; no license field was missing at generation time. Do not infer complete compliance from this abbreviated table.
 
 | Crate | Purpose | Upstream license expression |
 |---|---|---|
@@ -13,7 +13,7 @@ Actual selected versions belong to `Cargo.lock`; this table lists license famili
 | sha2 | Streaming SHA-256 | MIT OR Apache-2.0 |
 | libc | Linux kernel/libc descriptor interface | MIT OR Apache-2.0 |
 | iced | Native Rust GUI, tiny-skia backend | MIT |
-| tempfile (tests) | Explicitly-owned disposable fixtures | MIT OR Apache-2.0 |
+| tempfile | Private construction/cache images, atomic output publication and disposable fixtures | MIT OR Apache-2.0 |
 
 If additional dependencies are present in the workspace manifest, use the generated `docs/dependency-licenses.json` as the resolved source of truth. Iced pulls windowing, font, renderer, executor and platform crates; their licenses remain independent. No crates are selected from a mutable Git branch. `Cargo.lock` and `--locked` are mandatory for release builds.
 
@@ -25,8 +25,11 @@ If additional dependencies are present in the workspace manifest, use the genera
 | kdialog / zenity | Optional native image chooser, fixed `/usr/bin/kdialog` or `/usr/bin/zenity`; unprivileged, bounded child lifetime/output, no shell | OS-provided utilities; no binary linked or bundled. Installed Arch package metadata reports kdialog LGPL-2.0-or-later and Zenity LGPL-2.1-or-later |
 | Python 3 | Source-checkout installer and staging tests only | OS dependency; no Python runtime needed by Rust CLI/GUI |
 | Polkit/pkexec | Installed fixed helper authorization | System dependency; policy itself is project source |
-| wimlib-imagex | Optional standalone WIM staging only, fixed `/usr/bin/wimlib-imagex` | GPL-3.0-or-later program; wimlib library has LGPL licensing distinctions. No binary linked/bundled |
-| libfdisk/sfdisk, mkfs.fat, mkntfs, mkfs.exfat, mke2fs | Candidate future audited partition/format executors | Not invoked by the pure planner; package licensing assessed at integration |
+| wimlib-imagex | Required for Windows preparation/WIM verification/splitting; ordinary-user PATH discovery | GPL-3.0-or-later program; wimlib library has LGPL licensing distinctions. No binary linked/bundled |
+| 7z / 7zz | Bounded ISO9660/UDF listing and stdout extraction, unprivileged | OS-provided 7-Zip; no executable bundled |
+| dosfstools / mtools | Private FAT32 formatting, consistency checking, copy and file read-back | OS-provided GPL tools; no executable linked/bundled |
+| ntfs-3g tools | Private NTFS formatting and limited ntfsfix diagnostics | OS-provided GPL tools; no NTFS driver linked or installed on the media |
+| sfdisk | Independent fixture/partition validation | Runtime partition tables are constructed and verified by Rust; no physical sfdisk invocation |
 | UDisks2 | Potential unmount/safe removal integration | Presence is not implementation; optional future D-Bus integration |
 | GRUB/Syslinux | Potential per-strategy bootloader installation | GPL obligations, exact version/modules and firmware test matrix required |
 | UEFI:NTFS plus filesystem driver | Investigated only; not included | UEFI:NTFS GPL-2.0-or-later; driver license and signed-artifact identity checked separately |

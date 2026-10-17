@@ -1,5 +1,27 @@
 # Device safety and current admission policy
 
+Clients and the installed helper must share the `--protocol-v2` write contract.
+The exact argument is required before the helper reads a request or opens any
+source/target. Old helpers reject new clients and new helpers reject legacy
+clients; there is no fallback to older safety behavior. Install app/helper
+together from the same build before attempting physical writes. The application
+version alone is insufficient to identify a locally modified engineering build.
+
+Windows preparation and FAT32/NTFS formatting operate only on private ordinary
+files as the desktop user. The resulting disk image is admitted through the same
+raw plan, exact confirmation and narrow helper; external filesystem/archive/WIM
+tools never receive physical paths or root privileges. Preparation cancellation
+and target disconnect/replacement revoke continuation into a destructive review.
+
+Raw physical writes now clear recognized stale backup-GPT metadata at the target
+end when it lies outside the copied source. A valid bounded header may authorize
+clearing its entry array (at most 1 MiB); an invalid header authorizes only the
+last 512 bytes. Cleared bytes are separately read back as zero. Most unused tail
+space remains untouched, and no source metadata is changed or relocated. This
+prevents an old target-end GPT from overriding a new MBR, but does not repair or
+resize source GPTs. Safe removal/reinsertion is required to refresh OS partition
+nodes; kernel partition-table refresh/power-off is not performed by ForgeUSB.
+
 ForgeUSB displays whole physical disks obtained from `/sys/class/block`. USB
 transport is established from kernel sysfs ancestors, not a filename or the
 `removable` flag. Internal disks are visible with explanatory refusal reasons;
