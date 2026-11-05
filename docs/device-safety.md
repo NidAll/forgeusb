@@ -1,6 +1,6 @@
 # Device safety and current admission policy
 
-Clients and the installed helper must share the `--protocol-v2` write contract.
+Clients and the installed helper must share the `--protocol-v3` write contract.
 The exact argument is required before the helper reads a request or opens any
 source/target. Old helpers reject new clients and new helpers reject legacy
 clients; there is no fallback to older safety behavior. Install app/helper
@@ -19,8 +19,9 @@ clearing its entry array (at most 1 MiB); an invalid header authorizes only the
 last 512 bytes. Cleared bytes are separately read back as zero. Most unused tail
 space remains untouched, and no source metadata is changed or relocated. This
 prevents an old target-end GPT from overriding a new MBR, but does not repair or
-resize source GPTs. Safe removal/reinsertion is required to refresh OS partition
-nodes; kernel partition-table refresh/power-off is not performed by ForgeUSB.
+resize source GPTs. After verification the helper asks the kernel to re-read the partition table
+(`BLKRRPART`, best effort; failure is reported as a note). Power-off is a separate
+unprivileged UDisks2 step in the desktop session, after the helper has exited.
 
 ForgeUSB displays whole physical disks obtained from `/sys/class/block`. USB
 transport is established from kernel sysfs ancestors, not a filename or the
@@ -87,9 +88,13 @@ and hidden device topologies cannot be exhaustively reconstructed from these
 interfaces. Do not run the privileged helper inside containers or private mount
 namespaces, and review device identity immediately before authorizing a write.
 
-No function automatically unmounts partitions. Use the desktop's trusted UDisks
-unmount action, refresh discovery, then review a new plan. The GUI remains
-unprivileged. Raw operations are delegated to a scoped helper; the application
+The helper has two invocations, `write` and `verify` (each with `--plan-json --protocol-v3` and its own Polkit action). `verify` takes a plan without a confirmation, repeats the same source and device revalidation, and opens the drive exclusively but read-only; it never writes. The root helper never unmounts anything, and a mounted target is still refused
+there. Unmounting is offered only in the desktop session (GUI **Unmount**,
+`forgeusb unmount`), through `udisksctl` and UDisks' own Polkit rules, and only
+for USB drives whose sole admission problem is mounted filesystems (discovery's
+`blocked_only_by_mounts`). Internal or otherwise refused disks are never
+unmounted. After unmounting, discovery is repeated and a new plan is reviewed.
+The GUI remains unprivileged. Raw operations are delegated to a scoped helper; the application
 must require the model, direct path, and capacity confirmation before invoking
 it. The `eligible` field is provisional outside the privileged helper and is
 never user authorization. Root discovery and `revalidate` enforce authoritative

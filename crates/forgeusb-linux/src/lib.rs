@@ -1,14 +1,14 @@
 //! Shared read-only planner and raw-image operation engine for CLI and GUI.
 /// Fail closed when a desktop/CLI is paired with an older installed helper.
 /// Increment whenever the privileged execution contract or safety policy changes.
-pub const HELPER_PROTOCOL_ARGUMENT: &str = "--protocol-v2";
+pub mod session;
+pub const HELPER_PROTOCOL_ARGUMENT: &str = "--protocol-v3";
 
 use anyhow::{Context, Result, bail, ensure};
 use forgeusb_core::{Cancellation, Progress, Stage, capacity_check, progress};
 use forgeusb_device::Device;
-use forgeusb_image::{FileStamp, ImageInfo, inspect_cancel, open_source};
+use forgeusb_image::{Coverage, FileStamp, ImageInfo, inspect_with, open_source, sparse};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -39,11 +39,23 @@ pub struct Report {
     pub bytes: u64,
     pub sha256: String,
     pub verified: bool,
+    /// Bytes physically written (less than `bytes` for prepared sparse images).
+    #[serde(default)]
+    pub written: u64,
+    /// Non-fatal post-write notes, such as a failed partition-table refresh.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteRequest {
     pub plan: Plan,
     pub confirmation: String,
+}
+/// Read-only comparison of an already written physical device with its plan.
+/// No confirmation is needed: the helper never opens the device for writing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyRequest {
+    pub plan: Plan,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -61,11 +73,23 @@ pub fn plan_cancel(
     test_file: bool,
     cancel: &Cancellation,
 ) -> Result<Plan> {
+    plan_with(source, target, test_file, Coverage::Full, cancel)
+}
+/// Plan with an explicit coverage. Use `Coverage::DataRanges` only for images
+/// ForgeUSB prepared (Windows/format/decompress output): their holes are free
+/// space and are not written. Ordinary images must use `Coverage::Full`.
+pub fn plan_with(
+    source: &Path,
+    target: &Path,
+    test_file: bool,
+    coverage: Coverage,
+    cancel: &Cancellation,
+) -> Result<Plan> {
     ensure!(
         source.is_absolute() && target.is_absolute(),
         "source and target must be absolute paths"
     );
-    let image = inspect_cancel(source, cancel)?;
+    let image = inspect_with(source, cancel, coverage)?;
     plan_image(image, target, test_file)
 }
 fn plan_image(image: ImageInfo, target: &Path, test_file: bool) -> Result<Plan> {
@@ -86,6 +110,14 @@ fn plan_image(image: ImageInfo, target: &Path, test_file: bool) -> Result<Plan> 
     ensure!(strategy.executable, "{}", strategy.explanation);
     let mut warnings = image.warnings.clone();
     warnings.push(strategy.explanation.clone());
+    if image.coverage == Coverage::DataRanges {
+        sparse::validate(&image.ranges, image.size)?;
+        warnings.push(format!(
+            "Prepared image: {} of {} bytes hold data and are written and verified; unused filesystem space is skipped. The first and last 2 MiB are always written.",
+            image.transfer_bytes(),
+            image.size
+        ));
+    }
     warnings.push("Writing destroys existing target data. Cancellation can leave incomplete media. There is no rollback.".into());
     warnings.push("Verification compares every source byte. On a larger physical target, any stale GPT backup header at the device end and its bounded entry array outside the image are cleared and read back separately; other unused space is preserved. Image GPT metadata is preserved, without relocation. Firmware compatibility requires a boot test.".into());
     let (target_kind, capacity, confirmation) = if test_file {
@@ -170,6 +202,78 @@ pub fn execute(
     let source = open_source(&p.image.path)?;
     execute_opened(p, confirmation, source, cancel, emit)
 }
+/// Rebuild policy decisions from current facts rather than trusting serialized
+/// plan fields, then rewind the retained source.
+fn revalidate_plan(p: &Plan, source: &mut File, cancel: &Cancellation) -> Result<()> {
+    let inspected =
+        forgeusb_image::inspect_opened_with(&p.image.path, source, cancel, p.image.coverage)?;
+    let fresh = plan_image(
+        inspected,
+        &p.target,
+        matches!(p.target_kind, TargetKind::TestFile),
+    )?;
+    ensure!(
+        fresh.image == p.image
+            && fresh.confirmation == p.confirmation
+            && fresh.capacity == p.capacity
+            && fresh.strategy == p.strategy,
+        "plan is stale or modified; inspect and confirm again"
+    );
+    match (&fresh.target_kind, &p.target_kind) {
+        (TargetKind::Block(a), TargetKind::Block(b)) => {
+            ensure!(a.identity == b.identity, "device identity changed")
+        }
+        (TargetKind::TestFile, TargetKind::TestFile) => {}
+        _ => bail!("target kind changed"),
+    }
+    source_matches(source, &p.image)?;
+    source.seek(SeekFrom::Start(0))?;
+    cancel.check()
+}
+
+/// Helper-side read-only comparison of a physical device with its plan, using
+/// a source descriptor opened with the requesting user's credentials. The
+/// device is revalidated and opened exclusively but never for writing.
+pub fn verify_opened(
+    p: &Plan,
+    mut source: File,
+    cancel: &Cancellation,
+    mut emit: impl FnMut(Progress),
+) -> Result<Report> {
+    cancel.check()?;
+    source_matches(&source, &p.image)?;
+    let TargetKind::Block(device) = &p.target_kind else {
+        bail!("helper verification only accepts physical block-device plans");
+    };
+    emit(progress(
+        Stage::Revalidating,
+        0,
+        p.image.size,
+        "Rechecking source and device identity before reading the drive",
+    ));
+    revalidate_plan(p, &mut source, cancel)?;
+    let mut target = forgeusb_device::open_exclusive(device, false)?;
+    capacity_check(p.image.size, p.capacity)?;
+    let v = forgeusb_verify::compare_ranges(
+        &mut source,
+        &mut target,
+        p.image.coverage,
+        &p.image.ranges,
+        p.image.size,
+        &p.image.sha256,
+        cancel,
+        emit,
+    )?;
+    source_matches(&source, &p.image)?;
+    Ok(Report {
+        bytes: v.bytes,
+        sha256: v.sha256,
+        verified: true,
+        written: 0,
+        notes: Vec::new(),
+    })
+}
+
 /// Run using a retained source descriptor opened with the caller's credentials.
 /// No source path is reopened after authorization.
 pub fn execute_opened(
@@ -191,30 +295,7 @@ pub fn execute_opened(
         p.image.size,
         "Rechecking source and device identity before opening target",
     ));
-    // Rebuild policy decisions from current facts rather than trusting serialized plan fields.
-    let inspected = forgeusb_image::inspect_opened(&p.image.path, &mut source, cancel)?;
-    let fresh = plan_image(
-        inspected,
-        &p.target,
-        matches!(p.target_kind, TargetKind::TestFile),
-    )?;
-    ensure!(
-        fresh.image == p.image
-            && fresh.confirmation == p.confirmation
-            && fresh.capacity == p.capacity
-            && fresh.strategy == p.strategy,
-        "plan is stale or modified; inspect and confirm again"
-    );
-    match (&fresh.target_kind, &p.target_kind) {
-        (TargetKind::Block(a), TargetKind::Block(b)) => {
-            ensure!(a.identity == b.identity, "device identity changed")
-        }
-        (TargetKind::TestFile, TargetKind::TestFile) => {}
-        _ => bail!("target kind changed"),
-    }
-    source_matches(&source, &p.image)?;
-    source.seek(SeekFrom::Start(0))?;
-    cancel.check()?;
+    revalidate_plan(p, &mut source, cancel)?;
     let mut target = match &p.target_kind {
         TargetKind::TestFile => OpenOptions::new()
             .read(true)
@@ -230,29 +311,33 @@ pub fn execute_opened(
     let result = (|| -> Result<Report> {
         capacity_check(p.image.size, p.capacity)?;
         source_matches(&source, &p.image)?;
+        let ranges = p.image.effective_ranges();
+        let total = sparse::total(&ranges);
         let mut buffer = vec![0u8; 1024 * 1024];
-        let mut at = 0u64;
-        let mut hash = Sha256::new();
-        while at < p.image.size {
-            cancel.check()?;
-            let n = ((p.image.size - at).min(buffer.len() as u64)) as usize;
-            source
-                .read_exact(&mut buffer[..n])
-                .context("source truncated during write")?;
-            target
-                .write_all(&buffer[..n])
-                .with_context(|| format!("write target at offset {at}"))?;
-            hash.update(&buffer[..n]);
-            at += n as u64;
-            emit(progress(
-                Stage::Writing,
-                at,
-                p.image.size,
-                "Writing raw image",
-            ));
+        let mut written = 0u64;
+        let mut hash = sparse::Digester::new(p.image.coverage, p.image.size);
+        for range in &ranges {
+            hash.begin(*range);
+            source.seek(SeekFrom::Start(range.start))?;
+            target.seek(SeekFrom::Start(range.start))?;
+            let mut at = range.start;
+            while at < range.end {
+                cancel.check()?;
+                let n = ((range.end - at).min(buffer.len() as u64)) as usize;
+                source
+                    .read_exact(&mut buffer[..n])
+                    .context("source truncated during write")?;
+                target
+                    .write_all(&buffer[..n])
+                    .with_context(|| format!("write target at offset {at}"))?;
+                hash.update(&buffer[..n]);
+                at += n as u64;
+                written += n as u64;
+                emit(progress(Stage::Writing, written, total, "Writing image"));
+            }
         }
         ensure!(
-            format!("{:x}", hash.finalize()) == p.image.sha256,
+            hash.finish() == p.image.sha256,
             "source content changed during write; target is incomplete"
         );
         source_matches(&source, &p.image)?;
@@ -265,8 +350,8 @@ pub fn execute_opened(
         };
         emit(progress(
             Stage::Flushing,
-            at,
-            p.image.size,
+            written,
+            total,
             "Synchronizing target data",
         ));
         target
@@ -287,16 +372,18 @@ pub fn execute_opened(
         if advised != 0 {
             emit(progress(
                 Stage::Flushing,
-                at,
-                p.image.size,
+                written,
+                total,
                 format!(
                     "Cache eviction unavailable (errno {advised}); verifying through kernel I/O"
                 ),
             ));
         }
-        let v = forgeusb_verify::compare(
+        let v = forgeusb_verify::compare_ranges(
             &mut source,
             &mut target,
+            p.image.coverage,
+            &p.image.ranges,
             p.image.size,
             &p.image.sha256,
             cancel,
@@ -304,15 +391,23 @@ pub fn execute_opened(
         )?;
         verify_cleared_regions(&mut target, &cleared, cancel)?;
         source_matches(&source, &p.image)?;
+        let mut notes = Vec::new();
         if let TargetKind::Block(d) = &p.target_kind {
             forgeusb_device::revalidate(d)?;
+            // Ask the kernel to re-read the new partition table so its
+            // partition nodes match the written media without a replug.
+            if let Err(e) = reread_partitions(&target) {
+                notes.push(format!(
+                    "The kernel could not refresh the partition table ({e}); unplug and reinsert the drive before using it."
+                ));
+            }
         }
         emit(progress(
             Stage::Complete,
             v.bytes,
             p.image.size,
             if cleared.is_empty() {
-                "Write and full source-length read-back verified".to_owned()
+                "Write and read-back verified".to_owned()
             } else {
                 format!(
                     "Every source byte verified; {} stale GPT metadata bytes separately cleared and verified",
@@ -324,6 +419,8 @@ pub fn execute_opened(
             bytes: v.bytes,
             sha256: v.sha256,
             verified: true,
+            written,
+            notes,
         })
     })();
     if let Err(e) = result {
@@ -342,7 +439,24 @@ pub fn verify(
     cancel: &Cancellation,
     emit: impl FnMut(Progress),
 ) -> Result<Report> {
-    let info = inspect_cancel(source_path, cancel)?;
+    verify_with(
+        source_path,
+        target_path,
+        test_file,
+        Coverage::Full,
+        cancel,
+        emit,
+    )
+}
+pub fn verify_with(
+    source_path: &Path,
+    target_path: &Path,
+    test_file: bool,
+    coverage: Coverage,
+    cancel: &Cancellation,
+    emit: impl FnMut(Progress),
+) -> Result<Report> {
+    let info = inspect_with(source_path, cancel, coverage)?;
     let mut source = open_source(source_path)?;
     source_matches(&source, &info)?;
     let mut target = if test_file {
@@ -363,9 +477,11 @@ pub fn verify(
     if test_file {
         capacity_check(info.size, size)?;
     }
-    let v = forgeusb_verify::compare(
+    let v = forgeusb_verify::compare_ranges(
         &mut source,
         &mut target,
+        info.coverage,
+        &info.ranges,
         info.size,
         &info.sha256,
         cancel,
@@ -376,7 +492,18 @@ pub fn verify(
         bytes: v.bytes,
         sha256: v.sha256,
         verified: true,
+        written: 0,
+        notes: Vec::new(),
     })
+}
+/// `BLKRRPART`: re-scan partitions on a whole disk this process holds exclusively.
+fn reread_partitions(target: &File) -> std::io::Result<()> {
+    const BLKRRPART: libc::c_ulong = 0x125f;
+    if unsafe { libc::ioctl(target.as_raw_fd(), BLKRRPART as _) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 /// Find only backup GPT metadata outside the copied image. A stale header at
 /// the physical device end can otherwise override the newly written MBR on
@@ -720,6 +847,65 @@ mod tests {
         assert!(r.verified);
         assert_eq!(fs::read(&s).unwrap(), fs::read(&t).unwrap());
         assert!(execute(&p, &p.confirmation, &Cancellation::default(), |_| {}).is_err());
+    }
+    #[test]
+    fn helper_verification_refuses_file_plans_and_never_creates_targets() {
+        let d = tempfile::tempdir().unwrap();
+        let s = fixture(d.path());
+        let t = d.path().join("never-created.img");
+        let p = plan(&s, &t, true).unwrap();
+        let source = open_source(&s).unwrap();
+        let error = verify_opened(&p, source, &Cancellation::default(), |_| {}).unwrap_err();
+        assert!(format!("{error:#}").contains("physical block-device"));
+        assert!(!t.exists());
+        let json = serde_json::to_string(&VerifyRequest { plan: p }).unwrap();
+        let back: VerifyRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.plan.target, t);
+    }
+
+    #[test]
+    fn prepared_sparse_image_writes_only_data_ranges() {
+        use std::io::Write as _;
+        let d = tempfile::tempdir().unwrap();
+        let s = fixture(d.path());
+        // Grow the fixture into a 64 MiB sparse "prepared" image with a data island.
+        let mut f = OpenOptions::new().write(true).open(&s).unwrap();
+        f.set_len(64 * 1024 * 1024).unwrap();
+        f.seek(SeekFrom::Start(30 * 1024 * 1024)).unwrap();
+        f.write_all(&[9u8; 4096]).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        // MBR fixture partition ends at 4096 sectors; extend it over the image.
+        let mut bytes = fs::read(&s).unwrap();
+        bytes[458..462].copy_from_slice(&(64u32 * 2048 - 1).to_le_bytes());
+        let mut f = OpenOptions::new().write(true).open(&s).unwrap();
+        f.write_all(&bytes[..512]).unwrap();
+        drop(f);
+        let t = d.path().join("prepared-copy.img");
+        let p = plan_with(&s, &t, true, Coverage::DataRanges, &Cancellation::default()).unwrap();
+        assert_eq!(p.image.coverage, Coverage::DataRanges);
+        let r = execute(&p, &p.confirmation, &Cancellation::default(), |_| {}).unwrap();
+        assert!(r.verified && r.written <= r.bytes);
+        assert_eq!(r.bytes, 64 * 1024 * 1024);
+        // Holes read back as zeros, so the new file equals the source.
+        assert_eq!(fs::read(&s).unwrap(), fs::read(&t).unwrap());
+        let v = verify_with(
+            &s,
+            &t,
+            true,
+            Coverage::DataRanges,
+            &Cancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(v.sha256, p.image.sha256);
+        // A tampered range list is a modified plan.
+        let mut bad = p.clone();
+        bad.image.ranges.pop();
+        let t2 = d.path().join("tampered.img");
+        bad.target = t2.clone();
+        assert!(execute(&bad, &bad.confirmation, &Cancellation::default(), |_| {}).is_err());
+        assert!(!t2.exists());
     }
     #[test]
     fn confirmation_cancel_and_stale_source() {

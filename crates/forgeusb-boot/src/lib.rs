@@ -31,7 +31,7 @@ pub struct Strategy {
 pub fn select_strategy(image: &ImageCapabilities, firmware: Firmware) -> Result<Strategy> {
     ensure!(
         !image.compressed,
-        "compressed streaming is not implemented; decompress into a regular image file with a trusted tool and inspect it again"
+        "compressed images are expanded before writing: the desktop app does this automatically; on the command line run `forgeusb decompress IMAGE --output NEW.img`"
     );
     if image.windows_installer {
         ensure!(

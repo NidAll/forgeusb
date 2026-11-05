@@ -13,4 +13,15 @@
     <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/forgeusb/forgeusb-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">write</annotate>
   </action>
+  <action id="io.forgeusb.verify">
+    <description>Read back and verify an explicitly selected USB device</description>
+    <message>Administrator authorization is required to read the selected USB device and compare it with your image. Nothing is written.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/forgeusb/forgeusb-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">verify</annotate>
+  </action>
 </policyconfig>

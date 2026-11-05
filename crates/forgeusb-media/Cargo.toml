@@ -15,3 +15,9 @@ forgeusb-core = { path = "../forgeusb-core" }
 forgeusb-filesystem = { path = "../forgeusb-filesystem" }
 forgeusb-partition = { path = "../forgeusb-partition" }
 forgeusb-windows = { path = "../forgeusb-windows" }
+forgeusb-image = { path = "../forgeusb-image" }
+flate2 = "1.1"
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz"] }
+ruzstd = "0.9"
+bzip2 = "0.6"
+zip = { version = "9.4", default-features = false, features = ["deflate-flate2"] }

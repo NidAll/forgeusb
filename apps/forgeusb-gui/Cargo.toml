@@ -18,4 +18,7 @@ forgeusb-image = { path = "../../crates/forgeusb-image" }
 forgeusb-linux = { path = "../../crates/forgeusb-linux" }
 forgeusb-media = { path = "../../crates/forgeusb-media" }
 forgeusb-partition = { path = "../../crates/forgeusb-partition" }
+forgeusb-filesystem = { path = "../../crates/forgeusb-filesystem" }
+forgeusb-windows = { path = "../../crates/forgeusb-windows" }
+serde.workspace = true
 tempfile.workspace = true

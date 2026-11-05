@@ -117,3 +117,36 @@ development-validation.json. The remapped stripped CLI also passed the ordinary-
 file raw/corruption integration suite. No package was installed or published.
 An existing drm-fourcc upstream notice omission remains a redistribution review
 item; local package assembly is not full release/legal certification.
+
+## Rufus-gap P0–P3 round (2026-11-05)
+
+Validated on CachyOS x86_64 as the ordinary desktop user. Automated suites use owned files only; the physical acceptance below used one explicitly authorized disposable USB stick.
+
+- `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (**96 tests**) and `cargo build --release --workspace` passed.
+- `tests/installation.py`, `build-environment.py`, `source-package.py` and `file-integration.py` passed.
+- `tests/media-integration.py` now covers **eight** MBR/GPT × FAT32/NTFS/exFAT/ext4 images: report digest equals `inspect --prepared`, images stay sparse, sfdisk partition type/alignment, real filesystem headers, CLI `--prepared` write/verify and existing-output preservation.
+- `tests/boot-integration.py` (synthetic BIOS, UEFI Windows-shaped and ISOHybrid boots under QEMU) passed unchanged.
+- Private-Xvfb GUI: smoke, `--device-mode` and `--preview` (with a bootable synthetic image) passed; `tests/gui-windows.py` prepared Windows-shaped media, confirmed with `CREATE`, wrote and read back 320 MiB while transferring 5 MiB of data, and an independent `forgeusb verify --prepared` matched. Screenshots were reviewed for clipping and overlap.
+
+### Physical acceptance (2026-11-05)
+
+Explicitly authorized disposable stick: ASA INC ASA-FD-F, USB, 62,329,454,592 bytes, serial ending …0009C, previously holding `sda1` vfat "CACHYUSB". The protocol-v3 helper was installed with `install.sh --system --no-build` and was byte-identical to the build. Every write went through `pkexec` and the helper; plans and logs are in `test-output/physical-2026-11-05/` (not distributed).
+
+| Step | Result |
+|---|---|
+| `sda1` mounted through UDisks as the user, then `forgeusb unmount /dev/sda` | Unmounted through `udisksctl`; discovery returned to "ready" |
+| Raw write of official Alpine virt 3.24.2 ISO (SHA-256 `3ab42476…130b`) | Helper write and full read-back verified 66.0 MiB; the kernel showed the new iso9660 + vfat partitions immediately (partition re-read, no replug) |
+| Independent `sudo cmp -n 69206016` ISO vs `/dev/sda` | Identical |
+| Desktop auto-mounted the new partition | Next plan was refused ("sda1 has mounted filesystems"), as intended; `forgeusb unmount` cleared it |
+| Device-sized GPT exFAT image (`format-image --device /dev/sda`, 58.0 GiB, 6 MB on disk), `plan --prepared`, `write --eject` | 6.4 MiB written; data-range read-back verified (digest `0ec16ca6…04f7`); drive powered off through UDisks and disappeared from `/dev` |
+
+Finding: standalone `forgeusb verify` of a physical drive failed unprivileged (no `disk` group membership). Fixed the same day with a read-only `forgeusb-helper verify` mode; see below. Firmware boot of the physical stick was not tested.
+
+Read-only helper verification (after reinstalling the helper and a power-off/replug cycle):
+
+| Command | Result |
+|---|---|
+| `forgeusb verify exfat.img --device /dev/sda --prepared` | Polkit `io.forgeusb.verify` prompt; 58.0 GiB verified, digest `0ec16ca6…04f7`, identical to write time; the exFAT "FORGEUSB" volume survived power-off |
+| `forgeusb verify alpine-virt-3.24.2-x86_64.iso --device /dev/sda` (negative control) | Refused: "read-back mismatch at byte 0", exit 1 |
+
+Not yet validated: physical boot on real firmware, the GUI's physical path (typed drive name, Unmount button, safe removal) on hardware, genuine Windows Setup with the generated `autounattend.xml`, and real large compressed images.

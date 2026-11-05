@@ -100,15 +100,44 @@ pub fn plan_uefi_fat32(capacity: u64, sector: u64, scheme: Scheme) -> Result<Lay
 
 /// Plan one ordinary NTFS data partition; this does not install a boot loader.
 pub fn plan_ntfs(capacity: u64, sector: u64, scheme: Scheme) -> Result<Layout> {
-    let mut layout = plan_uefi_fat32(capacity, sector, scheme)?;
-    layout.partitions[0].filesystem = "ntfs".into();
-    layout.partitions[0].partition_type = if scheme == Scheme::Gpt {
-        "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7".into()
-    } else {
-        "0x07".into()
+    plan_data(capacity, sector, scheme, "ntfs")
+}
+
+/// Plan one aligned data partition for `ntfs`, `exfat` or `ext4`.
+/// Data partitions carry no boot code; FAT32 media uses [`plan_uefi_fat32`].
+pub fn plan_data(capacity: u64, sector: u64, scheme: Scheme, filesystem: &str) -> Result<Layout> {
+    let (mbr, gpt) = match filesystem {
+        "ntfs" | "exfat" => ("0x07", "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"),
+        "ext4" => ("0x83", "0FC63DAF-8483-4772-8E79-3D69D8477DE4"),
+        other => bail!("no data-partition type for filesystem {other}"),
     };
-    layout.explanation =
-        "One aligned NTFS data partition; no UEFI driver or BIOS bootstrap is installed".into();
+    let mut layout = plan_uefi_fat32_unbounded(capacity, sector, scheme)?;
+    layout.partitions[0].filesystem = filesystem.into();
+    layout.partitions[0].partition_type = if scheme == Scheme::Gpt { gpt } else { mbr }.into();
+    layout.explanation = format!(
+        "One aligned {filesystem} data partition; no UEFI driver or BIOS bootstrap is installed"
+    );
+    Ok(layout)
+}
+
+fn plan_uefi_fat32_unbounded(capacity: u64, sector: u64, scheme: Scheme) -> Result<Layout> {
+    // Same geometry as FAT32 media, without the FAT32-only sector-count limit.
+    if let Ok(layout) = plan_uefi_fat32(capacity, sector, scheme) {
+        return Ok(layout);
+    }
+    ensure!(
+        scheme == Scheme::Gpt,
+        "MBR address range exceeded or device too small; choose GPT"
+    );
+    let mut layout = plan_uefi_fat32(1024 * ALIGNMENT, sector, scheme)?;
+    let total = capacity / sector;
+    let reserve_end = 16_384_u64.div_ceil(sector) + 1;
+    let start = layout.partitions[0].start_lba;
+    layout.capacity_bytes = capacity;
+    layout.partitions[0].sectors = total
+        .checked_sub(reserve_end)
+        .and_then(|end| end.checked_sub(start))
+        .ok_or_else(|| anyhow::anyhow!("device too small for aligned partition"))?;
     Ok(layout)
 }
 

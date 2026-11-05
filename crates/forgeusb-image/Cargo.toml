@@ -12,5 +12,7 @@ libc.workspace = true
 forgeusb-core = { path = "../forgeusb-core" }
 sha2.workspace = true
 crc32fast = "1.4"
+md5 = { package = "md-5", version = "0.10" }
+sha1 = "0.10"
 [dev-dependencies]
 tempfile.workspace = true

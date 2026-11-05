@@ -109,7 +109,7 @@ The release binary is locally portable only where its dynamic C/desktop dependen
 ## Engineering-build helper compatibility
 
 Install the desktop, CLI and helper together from the same build. The current
-write contract uses `--protocol-v2`; mixed old/new clients and helpers fail before
+write contract uses `--protocol-v3`; mixed old/new clients and helpers fail before
 request I/O. A matching application version string alone does not identify local
 engineering changes. Preparation/formatting remains unprivileged and can be used
 without installing the helper. The production-development pass built packages

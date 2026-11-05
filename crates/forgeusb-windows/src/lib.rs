@@ -1,4 +1,5 @@
 //! Unprivileged Windows-media staging. No mounts, formatting, or device writes.
+pub mod unattend;
 use anyhow::{Context, Result, bail, ensure};
 use forgeusb_core::Cancellation;
 use forgeusb_filesystem::{FAT32_MAX_FILE_BYTES, validate_fat_name};

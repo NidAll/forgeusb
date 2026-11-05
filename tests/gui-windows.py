@@ -36,7 +36,8 @@ def child(args):
         env = os.environ.copy()
         env.pop("WAYLAND_DISPLAY", None)
         env.pop("WAYLAND_SOCKET", None)
-        env.update(WINIT_UNIX_BACKEND="x11", XDG_CACHE_HOME=str(cache))
+        env.update(WINIT_UNIX_BACKEND="x11", XDG_CACHE_HOME=str(cache),
+                   XDG_CONFIG_HOME=str(work / "config"))
         with log_path.open("w") as log:
             app = subprocess.Popen([str(args.binary), "--mode", "windows-mbr", "--image",
                                     str(args.source), "--test-output", str(target)],
@@ -74,8 +75,9 @@ def child(args):
                 time.sleep(1.5)
                 ui.require(not target.exists(), "preparation or review wrote the target")
                 ui.capture(args.output / "review.png")
-                confirmation = f"CREATE {target} {image.stat().st_size} bytes"
-                ui.keyboard_input("ForgeUSB", value=confirmation)
+                # Disposable-file targets are confirmed by typing CREATE; the
+                # GUI still hands the engine its exact, size-bound confirmation.
+                ui.keyboard_input("ForgeUSB", value="CREATE")
                 ui.keyboard_input("ForgeUSB", keys=("Return",))
                 deadline = time.monotonic() + 30
                 while "ForgeUSB operation complete: Verified " not in log_path.read_text():
@@ -85,7 +87,8 @@ def child(args):
                 time.sleep(0.2)
                 ui.capture(args.output / "completed.png")
                 result = subprocess.run([str(args.cli), "verify", str(image), "--device",
-                                         str(target), "--test-file", "--json"],
+                                         str(target), "--test-file", "--prepared",
+                                         "--json"],
                                         capture_output=True, text=True, timeout=15)
                 ui.require(result.returncode == 0, result.stderr)
                 report = {"ok": True, "private_display": True, "mode": "windows-mbr",

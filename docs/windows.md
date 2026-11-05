@@ -7,15 +7,40 @@ or receive block-device paths. The GUI uses this builder before displaying
 the destructive operation review.
 
 ```sh
-forgeusb prepare-windows /path/windows.iso --output /path/NEW-windows.img --scheme mbr --json
-forgeusb plan /path/NEW-windows.img --device /dev/sdX --json > plan.json
-forgeusb write --plan plan.json
+forgeusb prepare-windows /path/windows.iso --output /path/NEW-windows.img --device /dev/sdX --scheme mbr --json
+forgeusb plan /path/NEW-windows.img --device /dev/sdX --prepared --json > plan.json
+forgeusb write --plan plan.json --eject
 ```
+
+`--device` only reads the drive's capacity: the image becomes exactly that size
+(sparse, so it costs only its data on disk), the FAT32 partition fills the
+drive, and `--prepared` makes plan/verify transfer just the data ranges plus the
+first and last 2 MiB. Without `--device`, sizing is automatic as before.
+
+## Setup customization
+
+Options add an `autounattend.xml` at the media root (amd64, arm64 and x86
+components). Without options no file is added, and a source that already has
+an `autounattend.xml` is refused rather than overwritten.
+
+| CLI | GUI | Effect |
+|---|---|---|
+| `--bypass-requirements` | Remove the TPM 2.0, Secure Boot and 4 GB RAM requirements | windowsPE `LabConfig` BypassTPMCheck/BypassSecureBootCheck/BypassRAMCheck |
+| `--no-online-account` | Allow setup without a Microsoft account | `BypassNRO`, hidden online-account screens |
+| `--local-account NAME` | Create a local account named … | Local administrator with an empty password that must be changed at first sign-in; names are validated (1–20 characters, no reserved names or `"/\[]:;|=,+*?<>@`) |
+| `--regional[=LOCALE\|host]` | Use this computer's regional settings | International-Core input/system/UI/user locale from the value or `LANG` |
+| `--no-data-collection` | Decline optional data collection | `ProtectYourPC` 3 (privacy questions answered "no") |
+| `--no-bitlocker` | Turn off automatic BitLocker drive encryption | `PreventDeviceEncryption` in specialize |
+| `--label` | Volume label | FAT label (11 characters, uppercased) |
+
+These settings change how Windows Setup behaves; they are not tested against
+genuine Windows Setup by ForgeUSB. Bypassing hardware requirements can leave a
+PC on an unsupported configuration that may not receive updates.
 
 The source may also be an extracted directory. `--scheme gpt` creates a GPT EFI
 System Partition; the default MBR layout uses type 0xEF. Both are UEFI strategies.
 `--capacity-mib` sets an explicit image capacity; automatic sizing includes a
-conservative filesystem margin. Image capacity is bounded at 128 GiB and files at
+conservative filesystem margin. Image capacity is bounded at 2 TiB (FAT32's 32-bit sector count) and files at
 100,000 entries. A source-sized GPT is not relocated when written to a larger USB;
 firmware accepting only a backup header at the physical device end remains a
 hardware acceptance boundary. MBR avoids that GPT geometry issue.

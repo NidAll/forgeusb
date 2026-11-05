@@ -2,8 +2,10 @@
 //! Blocking I/O always runs on workers; the event loop only renders and polls.
 use forgeusb_core::{Cancellation, Progress, Stage};
 use forgeusb_device::Device;
-use forgeusb_image::ImageInfo;
+use forgeusb_image::checksums::{Checksums, PublishedSum};
+use forgeusb_image::{Coverage, ImageInfo, ImageKind};
 use forgeusb_linux::{HelperEvent, Plan, TargetKind, WriteRequest};
+use forgeusb_windows::unattend::Customization;
 use iced::widget::{
     button, checkbox, column, container, horizontal_rule, pick_list, progress_bar, row, scrollable,
     text, text_input,
@@ -19,6 +21,8 @@ use std::time::{Duration, Instant};
 
 const HELPER: &str = "/usr/lib/forgeusb/forgeusb-helper";
 const MAX_LOG_LINES: usize = 160;
+/// Disposable-file images in Format mode have no device to size them by.
+const TEST_FORMAT_BYTES: u64 = 512 * 1024 * 1024;
 
 fn main() -> iced::Result {
     // This is a Linux desktop application. Only the narrow helper may be root.
@@ -45,8 +49,8 @@ fn main() -> iced::Result {
         ..Font::DEFAULT
     })
     .window(iced::window::Settings {
-        size: (475.0, 560.0).into(),
-        min_size: Some((440.0, 540.0).into()),
+        size: (520.0, 740.0).into(),
+        min_size: Some((440.0, 560.0).into()),
         icon: Some(
             iced::window::icon::from_rgba(
                 include_bytes!("../assets/forgeusb-64.rgba").to_vec(),
@@ -70,7 +74,7 @@ struct Options {
     image: String,
     test_output: String,
     smoke: bool,
-    mode: Option<MediaMode>,
+    mode: Option<(MediaMode, SchemeChoice)>,
 }
 
 impl Options {
@@ -84,18 +88,19 @@ impl Options {
                 "--smoke-test" => result.smoke = true,
                 "--mode" => {
                     result.mode = Some(match args.next().as_deref() {
-                        Some("raw") => MediaMode::Raw,
-                        Some("windows-mbr") => MediaMode::WindowsMbr,
-                        Some("windows-gpt") => MediaMode::WindowsGpt,
+                        Some("raw") => (MediaMode::Raw, SchemeChoice::Mbr),
+                        Some("windows-mbr") => (MediaMode::Windows, SchemeChoice::Mbr),
+                        Some("windows-gpt") => (MediaMode::Windows, SchemeChoice::Gpt),
+                        Some("format") => (MediaMode::Format, SchemeChoice::Mbr),
                         _ => {
-                            eprintln!("--mode requires raw, windows-mbr or windows-gpt");
+                            eprintln!("--mode requires raw, windows-mbr, windows-gpt or format");
                             std::process::exit(2);
                         }
                     });
                 }
                 "--help" | "-h" => {
                     println!(
-                        "ForgeUSB desktop\n\n  --image PATH          Prefill the source path\n  --mode MODE           raw, windows-mbr or windows-gpt\n  --test-output PATH    Prefill a NEW disposable output file\n  --smoke-test          Open for ten seconds without starting an operation\n\nThe GUI must run as your normal desktop user."
+                        "ForgeUSB desktop\n\n  --image PATH          Prefill the source path\n  --mode MODE           raw, windows-mbr, windows-gpt or format\n  --test-output PATH    Prefill a NEW disposable output file\n  --smoke-test          Open for ten seconds without starting an operation\n\nThe GUI must run as your normal desktop user."
                     );
                     std::process::exit(0);
                 }
@@ -121,17 +126,36 @@ impl fmt::Display for DeviceChoice {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsOption {
+    Requirements,
+    OnlineAccount,
+    LocalAccount,
+    Regional,
+    DataCollection,
+    BitLocker,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     Tick,
     Refresh,
-    ImagePath(String),
     MediaMode(MediaMode),
+    Scheme(SchemeChoice),
+    Filesystem(FsChoice),
+    Label(String),
+    WindowsOption(WindowsOption, bool),
+    AccountName(String),
     BrowseImage,
     Inspect,
+    FileDropped(PathBuf),
     ChooseDevice(DeviceChoice),
+    Unmount,
+    EjectWhenDone(bool),
     TestMode(bool),
     TestPath(String),
+    EditTestPath,
+    TestPathDone,
     MakePlan,
     Confirmation(String),
     Start,
@@ -142,6 +166,9 @@ enum Message {
     ToggleLog,
     ToggleAdvanced,
     ToggleAdvancedFormat,
+    ShowChecksums,
+    ExpectedChecksum(String),
+    CloseChecksums,
     FocusImage,
     FocusNext(bool),
     SelectRelative(i8),
@@ -157,61 +184,181 @@ enum WorkerEvent {
     Planned(Result<Box<Plan>, String>),
     Progress(Progress),
     Finished(Result<String, String>),
+    Unmounted(Result<Device, String>),
+    Ejected(Result<String, String>),
+    Checksums(Result<(Checksums, Option<PublishedSum>), String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MediaMode {
     Raw,
-    WindowsMbr,
-    WindowsGpt,
+    Windows,
+    Format,
 }
 impl fmt::Display for MediaMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Raw => "Write in DD Image mode",
-            Self::WindowsMbr => "Windows installer (FAT32 / MBR / UEFI)",
-            Self::WindowsGpt => "Windows installer (FAT32 / GPT / UEFI)",
+            Self::Raw => "Disk or ISO image (write as-is)",
+            Self::Windows => "Windows installer (UEFI)",
+            Self::Format => "Format only (non-bootable drive)",
         })
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+enum SchemeChoice {
+    #[default]
+    Mbr,
+    Gpt,
+}
+impl fmt::Display for SchemeChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Mbr => "MBR",
+            Self::Gpt => "GPT",
+        })
+    }
+}
+impl From<SchemeChoice> for forgeusb_partition::Scheme {
+    fn from(value: SchemeChoice) -> Self {
+        match value {
+            SchemeChoice::Mbr => Self::Mbr,
+            SchemeChoice::Gpt => Self::Gpt,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+enum FsChoice {
+    #[default]
+    Fat32,
+    Exfat,
+    Ntfs,
+    Ext4,
+}
+impl FsChoice {
+    const ALL: [Self; 4] = [Self::Fat32, Self::Exfat, Self::Ntfs, Self::Ext4];
+    fn filesystem(self) -> forgeusb_filesystem::Filesystem {
+        match self {
+            Self::Fat32 => forgeusb_filesystem::Filesystem::Fat32,
+            Self::Exfat => forgeusb_filesystem::Filesystem::Exfat,
+            Self::Ntfs => forgeusb_filesystem::Filesystem::Ntfs,
+            Self::Ext4 => forgeusb_filesystem::Filesystem::Ext4,
+        }
+    }
+}
+impl fmt::Display for FsChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Fat32 => "FAT32 (any computer, files up to 4 GB)",
+            Self::Exfat => "exFAT (large files, Windows/macOS/Linux)",
+            Self::Ntfs => "NTFS (Windows)",
+            Self::Ext4 => "ext4 (Linux)",
+        })
+    }
+}
+
+/// Preferences remembered between sessions in $XDG_CONFIG_HOME/forgeusb.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct Settings {
+    #[serde(default)]
+    dark: bool,
+    #[serde(default = "yes")]
+    eject_when_done: bool,
+    #[serde(default)]
+    scheme: SchemeChoice,
+    #[serde(default)]
+    filesystem: FsChoice,
+    #[serde(default)]
+    windows: Customization,
+    #[serde(default)]
+    last_directory: Option<PathBuf>,
+}
+fn yes() -> bool {
+    true
+}
+fn settings_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    base.is_absolute()
+        .then(|| base.join("forgeusb").join("settings.json"))
+}
+fn load_settings() -> Settings {
+    settings_path()
+        .and_then(|p| std::fs::read(p).ok())
+        .filter(|b| b.len() <= 64 * 1024)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Settings {
+            eject_when_done: true,
+            ..Default::default()
+        })
+}
+
 struct PreparedMedia {
     // Own the private directory until the final write/verification has finished.
     _directory: tempfile::TempDir,
     image: ImageInfo,
+    /// Device capacity the image was sized for (None for disposable files).
+    sized_for: Option<u64>,
+    summary: String,
 }
 
 struct Running {
     cancel: Cancellation,
     progress: Progress,
     started: Instant,
+    /// Start of the current stage, for throughput and time-remaining estimates.
+    stage_started: Instant,
+}
+
+#[derive(Default)]
+struct ChecksumView {
+    computing: bool,
+    result: Option<Checksums>,
+    published: Option<PublishedSum>,
+    expected: String,
+    error: Option<String>,
 }
 
 struct State {
     image_path: String,
     image: Option<ImageInfo>,
     media_mode: MediaMode,
+    scheme: SchemeChoice,
+    filesystem: FsChoice,
+    label: String,
+    windows: Customization,
+    account_name: String,
+    host_locale: Option<String>,
     prepared: Option<PreparedMedia>,
     devices: Vec<Device>,
     choices: Vec<DeviceChoice>,
     selected: Option<DeviceChoice>,
     test_mode: bool,
     test_path: String,
+    editing_test_path: bool,
     plan: Option<Plan>,
     confirmation: String,
     running: Option<Running>,
+    writing_device: Option<Device>,
+    eject_when_done: bool,
     inspecting: bool,
     planning: bool,
     discovering: bool,
+    unmounting: bool,
     dark: bool,
     show_log: bool,
     advanced: bool,
     advanced_format: bool,
     confirm_open: bool,
+    checksums: Option<ChecksumView>,
     picking: bool,
     picker_cancel: Cancellation,
     error: Option<String>,
     discovery_error: Option<String>,
     status: String,
+    done: bool,
     log: VecDeque<String>,
     tx: SyncSender<WorkerEvent>,
     rx: Receiver<WorkerEvent>,
@@ -219,11 +366,29 @@ struct State {
     smoke_started: Option<Instant>,
     exit_after_operation: bool,
     focus_preview: bool,
+    persist: bool,
 }
 
 impl State {
     fn new(options: Options) -> Self {
         let mut state = Self::empty(options);
+        let settings = load_settings();
+        state.dark = settings.dark;
+        state.eject_when_done = settings.eject_when_done;
+        state.filesystem = settings.filesystem;
+        if state.media_mode == MediaMode::Raw {
+            state.scheme = settings.scheme;
+        }
+        state.account_name = settings.windows.local_account.clone().unwrap_or_default();
+        state.windows = Customization {
+            regional: settings
+                .windows
+                .regional
+                .as_ref()
+                .and(state.host_locale.clone()),
+            ..settings.windows
+        };
+        state.persist = true;
         state.append_log("ForgeUSB started as an unprivileged desktop user.");
         state.refresh();
         if !state.image_path.trim().is_empty() {
@@ -234,32 +399,45 @@ impl State {
 
     fn empty(options: Options) -> Self {
         let (tx, rx) = mpsc::sync_channel(256);
+        let (media_mode, scheme) = options.mode.unwrap_or((MediaMode::Raw, SchemeChoice::Mbr));
         Self {
             image_path: options.image,
             image: None,
-            media_mode: options.mode.unwrap_or(MediaMode::Raw),
+            media_mode,
+            scheme,
+            filesystem: FsChoice::Fat32,
+            label: "FORGEUSB".into(),
+            windows: Customization::default(),
+            account_name: String::new(),
+            host_locale: forgeusb_windows::unattend::host_locale(),
             prepared: None,
             devices: Vec::new(),
             choices: Vec::new(),
             selected: None,
             test_mode: !options.test_output.is_empty(),
+            editing_test_path: options.test_output.is_empty(),
             test_path: options.test_output,
             plan: None,
             confirmation: String::new(),
             running: None,
+            writing_device: None,
+            eject_when_done: true,
             inspecting: false,
             planning: false,
             discovering: false,
+            unmounting: false,
             dark: false,
             show_log: false,
             advanced: false,
             advanced_format: false,
             confirm_open: false,
+            checksums: None,
             picking: false,
             picker_cancel: Cancellation::default(),
             error: None,
             discovery_error: None,
             status: "Ready.".into(),
+            done: false,
             log: VecDeque::new(),
             tx,
             rx,
@@ -267,7 +445,65 @@ impl State {
             smoke_started: options.smoke.then(Instant::now),
             exit_after_operation: false,
             focus_preview: false,
+            persist: false,
         }
+    }
+
+    fn save_settings(&self) {
+        if !self.persist {
+            return;
+        }
+        let settings = Settings {
+            dark: self.dark,
+            eject_when_done: self.eject_when_done,
+            scheme: self.scheme,
+            filesystem: self.filesystem,
+            windows: self.customization(),
+            last_directory: PathBuf::from(self.image_path.trim())
+                .parent()
+                .filter(|p| p.is_absolute())
+                .map(PathBuf::from),
+        };
+        if let Some(path) = settings_path()
+            && let Some(parent) = path.parent()
+            && std::fs::create_dir_all(parent).is_ok()
+            && let Ok(json) = serde_json::to_vec_pretty(&settings)
+        {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    /// Keep the volume label within the target file system's rules as it is typed.
+    fn fit_label(&self, value: &str) -> String {
+        let filesystem = match self.media_mode {
+            MediaMode::Windows => FsChoice::Fat32,
+            _ => self.filesystem,
+        };
+        match filesystem {
+            FsChoice::Fat32 => forgeusb_media::fat_label(value),
+            FsChoice::Exfat => value.chars().take(11).collect(),
+            FsChoice::Ntfs => value.chars().take(32).collect(),
+            FsChoice::Ext4 => {
+                let mut label = String::new();
+                for c in value.chars() {
+                    if label.len() + c.len_utf8() > 16 {
+                        break;
+                    }
+                    label.push(c);
+                }
+                label
+            }
+        }
+    }
+
+    /// Windows options as they will be applied, including the account name.
+    fn customization(&self) -> Customization {
+        let mut c = self.windows.clone();
+        if c.local_account.is_some() {
+            let name = self.account_name.trim();
+            c.local_account = (!name.is_empty()).then(|| name.to_owned());
+        }
+        c
     }
 
     fn append_log(&mut self, line: impl Into<String>) {
@@ -280,6 +516,7 @@ impl State {
     fn invalidate_plan(&mut self) {
         self.clear_review();
         self.error = None;
+        self.done = false;
     }
 
     fn clear_review(&mut self) {
@@ -287,6 +524,12 @@ impl State {
         self.confirm_open = false;
         self.focus_preview = false;
         self.confirmation.clear();
+    }
+
+    /// Prepared media depends on the source, options and target size.
+    fn invalidate_prepared(&mut self) {
+        self.prepared = None;
+        self.invalidate_plan();
     }
 
     fn refresh(&mut self) {
@@ -299,6 +542,15 @@ impl State {
             let result = forgeusb_device::discover().map_err(|e| format!("{e:#}"));
             let _ = tx.send(WorkerEvent::Devices(result));
         });
+    }
+
+    fn editable(&self) -> bool {
+        self.idle() && !self.confirm_open && !self.show_log && self.checksums.is_none()
+    }
+
+    fn selected_device(&self) -> Option<&Device> {
+        let selected = self.selected.as_ref()?;
+        self.devices.iter().find(|d| d.path == selected.path)
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -341,25 +593,66 @@ impl State {
                 }
             }
             Message::Refresh => self.refresh(),
-            Message::ImagePath(value) if self.idle() && !self.confirm_open && !self.show_log => {
-                self.image_path = value;
-                self.image = None;
-                self.prepared = None;
-                self.invalidate_plan();
+            Message::FileDropped(path) if self.editable() => {
+                if let Some(path) = path.to_str().filter(|_| path.is_absolute()) {
+                    self.image_path = path.to_owned();
+                    self.image = None;
+                    self.invalidate_prepared();
+                    if self.media_mode == MediaMode::Format {
+                        self.media_mode = MediaMode::Raw;
+                    }
+                    return self.update(Message::Inspect);
+                }
             }
-            Message::MediaMode(value) if self.idle() && !self.confirm_open && !self.show_log => {
+            Message::MediaMode(value) if self.editable() => {
                 self.media_mode = value;
-                self.image = None;
-                self.prepared = None;
-                self.invalidate_plan();
-                self.status = if value == MediaMode::Raw {
-                    "Select an image. Press START to review the operation."
-                } else {
-                    "Select a Windows ISO. START prepares a private image before USB review."
+                self.invalidate_prepared();
+                self.label = self.fit_label(&self.label.clone());
+                self.status = match value {
+                    MediaMode::Raw => "Choose a disk or ISO image, then press START.",
+                    MediaMode::Windows => {
+                        "Choose a Windows ISO. START builds verified installer media, then asks you to confirm."
+                    }
+                    MediaMode::Format => "Choose a file system, then press START to erase and format the drive.",
                 }
                 .into();
             }
-            Message::BrowseImage if self.idle() && !self.confirm_open && !self.show_log => {
+            Message::Scheme(value) if self.editable() => {
+                self.scheme = value;
+                self.invalidate_prepared();
+                self.save_settings();
+            }
+            Message::Filesystem(value) if self.editable() => {
+                self.filesystem = value;
+                self.label = self.fit_label(&self.label.clone());
+                self.invalidate_prepared();
+                self.save_settings();
+            }
+            Message::Label(value) if self.editable() => {
+                self.label = self.fit_label(&value);
+                self.invalidate_prepared();
+            }
+            Message::WindowsOption(option, on) if self.editable() => {
+                match option {
+                    WindowsOption::Requirements => self.windows.bypass_requirements = on,
+                    WindowsOption::OnlineAccount => self.windows.bypass_online_account = on,
+                    WindowsOption::LocalAccount => {
+                        self.windows.local_account = on.then(|| self.account_name.clone());
+                    }
+                    WindowsOption::Regional => {
+                        self.windows.regional = if on { self.host_locale.clone() } else { None };
+                    }
+                    WindowsOption::DataCollection => self.windows.disable_data_collection = on,
+                    WindowsOption::BitLocker => self.windows.disable_bitlocker = on,
+                }
+                self.invalidate_prepared();
+                self.save_settings();
+            }
+            Message::AccountName(value) if self.editable() => {
+                self.account_name = value.chars().take(20).collect();
+                self.invalidate_prepared();
+            }
+            Message::BrowseImage if self.editable() => {
                 self.invalidate_plan();
                 self.picking = true;
                 self.picker_cancel = Cancellation::default();
@@ -370,16 +663,7 @@ impl State {
                     let _ = tx.send(WorkerEvent::PickedImage(select_image(&cancel)));
                 });
             }
-            Message::Inspect
-                if self.idle()
-                    && !self.confirm_open
-                    && !self.show_log
-                    && !self.image_path.trim().is_empty() =>
-            {
-                if self.media_mode != MediaMode::Raw {
-                    self.status = "Windows source selected. START prepares and verifies a private FAT32 image before USB review.".into();
-                    return Task::none();
-                }
+            Message::Inspect if self.editable() && !self.image_path.trim().is_empty() => {
                 self.inspecting = true;
                 self.invalidate_plan();
                 self.status = "Analyzing image structure and calculating SHA-256…".into();
@@ -390,39 +674,82 @@ impl State {
                     let _ = tx.send(WorkerEvent::Inspected(result));
                 });
             }
-            Message::ChooseDevice(value) if self.idle() && !self.confirm_open && !self.show_log => {
+            Message::ChooseDevice(value) if self.editable() => {
+                if self.selected.as_ref().map(|s| &s.path) != Some(&value.path) {
+                    self.prepared = None;
+                }
                 self.selected = Some(value);
                 self.invalidate_plan();
             }
-            Message::TestMode(value) if self.idle() && !self.confirm_open && !self.show_log => {
+            Message::Unmount if self.editable() && !self.unmounting => {
+                if let Some(device) = self.selected_device() {
+                    let path = device.path.clone();
+                    self.unmounting = true;
+                    self.status = "Unmounting the drive…".into();
+                    let tx = self.tx.clone();
+                    std::thread::spawn(move || {
+                        let result =
+                            forgeusb_linux::session::unmount(&path).map_err(|e| format!("{e:#}"));
+                        let _ = tx.send(WorkerEvent::Unmounted(result));
+                    });
+                }
+            }
+            Message::EjectWhenDone(value) => {
+                self.eject_when_done = value;
+                self.save_settings();
+            }
+            Message::TestMode(value) if self.editable() => {
                 self.test_mode = value;
                 self.selected = None;
-                self.invalidate_plan();
+                self.invalidate_prepared();
             }
-            Message::TestPath(value) if self.idle() && !self.confirm_open && !self.show_log => {
+            Message::TestPath(value) if self.editable() => {
                 self.test_path = value;
                 self.invalidate_plan();
+            }
+            Message::EditTestPath if self.editable() => {
+                self.editing_test_path = true;
+                return text_input::focus(text_input::Id::new("test-output"));
+            }
+            Message::TestPathDone => {
+                self.editing_test_path = self.test_path.trim().is_empty();
             }
             Message::MakePlan if self.can_plan() => {
                 self.planning = true;
                 self.invalidate_plan();
-                if self.media_mode != MediaMode::Raw && self.prepared.is_none() {
-                    self.prepare_windows();
+                let capacity = (!self.test_mode)
+                    .then(|| self.selected_device().map(|d| d.capacity))
+                    .flatten();
+                if self
+                    .prepared
+                    .as_ref()
+                    .is_some_and(|p| p.sized_for != capacity)
+                {
+                    // Media built for another drive size must be rebuilt.
+                    self.prepared = None;
+                }
+                if self.needs_preparation() && self.prepared.is_none() {
+                    self.prepare();
                     return Task::none();
                 }
                 self.status = "Building a read-only operation plan…".into();
-                let source = self
-                    .prepared
-                    .as_ref()
-                    .map(|media| media.image.path.clone())
-                    .unwrap_or_else(|| PathBuf::from(self.image_path.trim()));
+                let (source, coverage) = match &self.prepared {
+                    Some(media) => (media.image.path.clone(), media.image.coverage),
+                    None => (PathBuf::from(self.image_path.trim()), Coverage::Full),
+                };
                 let target = self.target().expect("can_plan requires a target");
                 let test_file = self.test_mode;
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
-                    let result = forgeusb_linux::plan(&source, &target, test_file)
-                        .map(Box::new)
-                        .map_err(|e| format!("{e:#}"));
+                    let result = forgeusb_linux::plan_with(
+                        &source,
+                        &target,
+                        test_file,
+                        coverage,
+                        &Cancellation::default(),
+                    )
+                    .map(Box::new)
+                    .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(WorkerEvent::Planned(result));
                 });
             }
@@ -436,15 +763,13 @@ impl State {
             }
             Message::DismissPlan if self.running.is_none() => {
                 self.invalidate_plan();
-                self.status = "Operation cancelled before writing.".into();
+                self.status = "Cancelled before writing. Nothing was changed.".into();
             }
             Message::Start if self.can_start() => self.start(),
             Message::Cancel => {
                 if let Some(running) = &self.running {
                     running.cancel.cancel();
-                    self.status =
-                        "Cancellation requested. Waiting for the current I/O boundary and flush…"
-                            .into();
+                    self.status = "Cancelling at the next safe point…".into();
                     self.append_log(if self.planning {
                         "Preparation cancellation requested; no USB write has started."
                     } else {
@@ -452,16 +777,42 @@ impl State {
                     });
                 } else if self.picking {
                     self.picker_cancel.cancel();
+                } else if self.checksums.is_some() {
+                    self.checksums = None;
                 } else if self.confirm_open {
                     return self.update(Message::DismissPlan);
                 } else if self.show_log {
                     self.show_log = false;
                 }
             }
-            Message::ToggleTheme => self.dark = !self.dark,
+            Message::ToggleTheme => {
+                self.dark = !self.dark;
+                self.save_settings();
+            }
             Message::ToggleLog if !self.confirm_open => self.show_log = !self.show_log,
             Message::ToggleAdvanced => self.advanced = !self.advanced,
             Message::ToggleAdvancedFormat => self.advanced_format = !self.advanced_format,
+            Message::ShowChecksums if self.editable() && !self.image_path.trim().is_empty() => {
+                let path = PathBuf::from(self.image_path.trim());
+                self.checksums = Some(ChecksumView {
+                    computing: true,
+                    ..Default::default()
+                });
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let result =
+                        forgeusb_image::checksums::compute(&path, &Cancellation::default(), |_| {})
+                            .map(|sums| (sums, forgeusb_image::checksums::find_published(&path)))
+                            .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(WorkerEvent::Checksums(result));
+                });
+            }
+            Message::ExpectedChecksum(value) => {
+                if let Some(view) = &mut self.checksums {
+                    view.expected = value.chars().take(160).collect();
+                }
+            }
+            Message::CloseChecksums => self.checksums = None,
             Message::FocusImage => return self.update(Message::BrowseImage),
             Message::FocusNext(backward) => {
                 return if backward {
@@ -471,11 +822,7 @@ impl State {
                 };
             }
             Message::SelectRelative(direction)
-                if self.idle()
-                    && !self.confirm_open
-                    && !self.show_log
-                    && !self.test_mode
-                    && !self.choices.is_empty() =>
+                if self.editable() && !self.test_mode && !self.choices.is_empty() =>
             {
                 let current = self
                     .selected
@@ -489,10 +836,9 @@ impl State {
                     None if direction < 0 => self.choices.len() - 1,
                     None => 0,
                 };
-                self.selected = Some(self.choices[index].clone());
-                self.invalidate_plan();
+                return self.update(Message::ChooseDevice(self.choices[index].clone()));
             }
-            Message::ToggleTestMode if self.idle() && !self.confirm_open && !self.show_log => {
+            Message::ToggleTestMode if self.editable() => {
                 return self.update(Message::TestMode(!self.test_mode));
             }
             Message::CloseRequested => {
@@ -526,6 +872,9 @@ impl State {
                         self.image_path = path;
                         self.image = None;
                         self.prepared = None;
+                        if self.media_mode == MediaMode::Format {
+                            self.media_mode = MediaMode::Raw;
+                        }
                         let _ = self.update(Message::Inspect);
                     }
                     Ok(None) => self.status = "Ready.".into(),
@@ -539,14 +888,15 @@ impl State {
                         self.discovery_error = None;
                         self.choices = devices
                             .iter()
-                            .filter(|d| d.eligible)
+                            .filter(|d| d.eligible || d.blocked_only_by_mounts)
                             .map(|d| DeviceChoice {
                                 path: d.path.clone(),
                                 label: format!(
-                                    "{} ({}) [{}]",
-                                    ellipsize(&d.model, 28),
+                                    "{} · {} · {}{}",
+                                    ellipsize(&device_model(d), 26),
+                                    drive_size(d.capacity),
                                     d.path.display(),
-                                    size(d.capacity)
+                                    if d.eligible { "" } else { " (mounted)" }
                                 ),
                             })
                             .collect();
@@ -554,17 +904,22 @@ impl State {
                             let new = devices.iter().find(|d| d.path == selected.path);
                             let old = self.devices.iter().find(|d| d.path == selected.path);
                             let unchanged = new.zip(old).is_some_and(|(new, old)| {
-                                new.eligible
+                                (new.eligible || new.blocked_only_by_mounts)
                                     && new.identity == old.identity
                                     && new.capacity == old.capacity
                             });
                             if !unchanged && (self.running.is_none() || self.planning) {
                                 self.selected = None;
+                                self.prepared = None;
                                 self.invalidate_plan();
                                 self.status =
-                                    "Target changed or disconnected. Select and preview it again."
+                                    "The selected drive changed or was disconnected. Choose it again."
                                         .into();
                                 self.append_log("Target selection cleared because device eligibility or identity changed.");
+                            } else if let Some(choice) =
+                                self.choices.iter().find(|c| c.path == selected.path)
+                            {
+                                self.selected = Some(choice.clone());
                             }
                         }
                         self.devices = devices;
@@ -587,10 +942,17 @@ impl State {
                 self.inspecting = false;
                 match result {
                     Ok(image) => {
-                        self.status = "Image analyzed. Press START to review the operation.".into();
+                        self.status = "Image analyzed. Press START to continue.".into();
                         if image.windows && !image.bootable_disk {
-                            self.media_mode = MediaMode::WindowsMbr;
-                            self.status = "Windows installer detected. START prepares FAT32 UEFI media before USB review.".into();
+                            if self.media_mode != MediaMode::Windows {
+                                self.media_mode = MediaMode::Windows;
+                            }
+                            self.status = "Windows installer detected. START builds verified installer media before asking you to confirm.".into();
+                        } else if self.media_mode == MediaMode::Windows && !image.windows {
+                            self.media_mode = MediaMode::Raw;
+                        }
+                        if image.kind == ImageKind::Compressed {
+                            self.status = "Compressed image. START expands it in your cache, then asks you to confirm.".into();
                         }
                         self.append_log(format!(
                             "Analyzed {} ({}); SHA-256 {}",
@@ -599,6 +961,7 @@ impl State {
                             image.sha256
                         ));
                         self.image = Some(image);
+                        self.save_settings();
                     }
                     Err(error) => self.fail(error),
                 }
@@ -619,8 +982,12 @@ impl State {
                 }
                 match result {
                     Ok(prepared) => {
-                        self.append_log(format!("Prepared and verified private Windows FAT32 image: {} bytes; SHA-256 {}. Windows Setup and Secure Boot are not validated by this operation.", prepared.image.size, prepared.image.sha256));
-                        self.image = Some(prepared.image.clone());
+                        self.append_log(prepared.summary.clone());
+                        if self.media_mode == MediaMode::Raw {
+                            // A decompressed image replaces the compressed one for review.
+                        } else {
+                            self.image = Some(prepared.image.clone());
+                        }
                         self.prepared = Some(prepared);
                         let _ = self.update(Message::MakePlan);
                     }
@@ -648,15 +1015,13 @@ impl State {
                             self.status = "Target changed while planning. Select it again and create a new preview.".into();
                             return;
                         }
-                        self.image = Some(plan.image.clone());
                         self.append_log(format!(
                             "Read-only preview: {} -> {} ({} bytes)",
                             plan.image.path.display(),
                             plan.target.display(),
                             plan.image.size
                         ));
-                        self.status =
-                            "Review the operation and confirm the selected target.".into();
+                        self.status = "Check the drive and confirm.".into();
                         self.plan = Some(*plan);
                         self.confirm_open = true;
                         self.show_log = false;
@@ -668,6 +1033,9 @@ impl State {
             WorkerEvent::Progress(progress) => {
                 if let Some(running) = &mut self.running {
                     let changed = running.progress.stage != progress.stage;
+                    if changed {
+                        running.stage_started = Instant::now();
+                    }
                     running.progress = progress.clone();
                     if changed {
                         self.append_log(format!("{:?}: {}", progress.stage, progress.message));
@@ -680,27 +1048,84 @@ impl State {
                 self.confirm_open = false;
                 self.plan = None;
                 self.confirmation.clear();
+                let device = self.writing_device.take();
                 match result {
                     Ok(summary) => {
                         println!("ForgeUSB operation complete: {summary}");
-                        self.status = summary.clone();
-                        self.append_log(summary);
+                        self.done = true;
+                        self.append_log(summary.clone());
+                        self.status = summary;
+                        if let Some(device) = device.filter(|_| self.eject_when_done) {
+                            self.status = "Verified. Safely removing the drive…".into();
+                            let tx = self.tx.clone();
+                            std::thread::spawn(move || {
+                                let result = forgeusb_linux::session::power_off(&device)
+                                    .map(|()| format!("Verified and safely removed {}. You can unplug it now.", device_model(&device)))
+                                    .map_err(|e| format!("{e:#}"));
+                                let _ = tx.send(WorkerEvent::Ejected(result));
+                            });
+                        }
                     }
                     Err(error) => self.fail(error),
                 }
                 self.refresh();
             }
+            WorkerEvent::Unmounted(result) => {
+                self.unmounting = false;
+                match result {
+                    Ok(device) => {
+                        self.append_log(format!("Unmounted {}.", device.path.display()));
+                        self.status = "Drive unmounted. Press START to continue.".into();
+                        self.error = None;
+                    }
+                    Err(error) => self.fail(format!(
+                        "Could not unmount the drive: {error}. Close any open files on it, or eject it in your file manager, then press Refresh."
+                    )),
+                }
+                self.refresh();
+            }
+            WorkerEvent::Ejected(result) => {
+                match result {
+                    Ok(message) => {
+                        self.append_log(message.clone());
+                        self.status = message;
+                    }
+                    Err(error) => {
+                        self.append_log(format!("Safe removal failed: {error}"));
+                        self.status = "Verified. Eject the drive from your file manager before unplugging it.".into();
+                    }
+                }
+            }
+            WorkerEvent::Checksums(result) => {
+                if let Some(view) = &mut self.checksums {
+                    view.computing = false;
+                    match result {
+                        Ok((sums, published)) => {
+                            if let Some(p) = &published {
+                                view.expected = p.digest.clone();
+                            }
+                            view.result = Some(sums);
+                            view.published = published;
+                        }
+                        Err(error) => view.error = Some(error),
+                    }
+                }
+            }
         }
     }
 
     fn fail(&mut self, error: String) {
-        self.status = "Operation stopped. Review the error below.".into();
+        self.status = "Stopped. See the message above.".into();
         self.append_log(format!("Error: {error}"));
         self.error = Some(error);
     }
 
     fn idle(&self) -> bool {
-        self.running.is_none() && !self.inspecting && !self.planning && !self.picking
+        self.running.is_none()
+            && !self.inspecting
+            && !self.planning
+            && !self.picking
+            && !self.unmounting
     }
 
     fn target(&self) -> Option<PathBuf> {
@@ -711,37 +1136,62 @@ impl State {
         }
     }
 
-    fn can_plan(&self) -> bool {
-        self.idle()
-            && !self.confirm_open
-            && !self.show_log
-            && !self.image_path.trim().is_empty()
-            && (self.media_mode != MediaMode::Raw
-                || self.image.as_ref().is_none_or(|image| image.bootable_disk))
-            && (self.media_mode == MediaMode::Raw || self.smoke_started.is_none())
-            && self.target().is_some()
+    fn needs_preparation(&self) -> bool {
+        match self.media_mode {
+            MediaMode::Raw => self
+                .image
+                .as_ref()
+                .is_some_and(|image| image.kind == ImageKind::Compressed),
+            MediaMode::Windows | MediaMode::Format => true,
+        }
     }
 
-    fn prepare_windows(&mut self) {
+    fn can_plan(&self) -> bool {
+        let source_ready = match self.media_mode {
+            MediaMode::Raw => {
+                !self.image_path.trim().is_empty()
+                    && self.image.as_ref().is_none_or(|image| {
+                        image.bootable_disk || image.kind == ImageKind::Compressed
+                    })
+            }
+            MediaMode::Windows => !self.image_path.trim().is_empty(),
+            MediaMode::Format => true,
+        };
+        let target_ready = self.test_mode || self.selected_device().is_some_and(|d| d.eligible);
+        self.editable()
+            && source_ready
+            && (!self.needs_preparation()
+                || self.smoke_started.is_none()
+                || self.prepared.is_some())
+            && self.target().is_some()
+            && target_ready
+    }
+
+    fn prepare(&mut self) {
         let source = PathBuf::from(self.image_path.trim());
-        let scheme = if self.media_mode == MediaMode::WindowsGpt {
-            forgeusb_partition::Scheme::Gpt
+        let mode = self.media_mode;
+        let scheme = self.scheme.into();
+        let filesystem = self.filesystem.filesystem();
+        let label = self.fit_label(self.label.trim());
+        let customization = self.customization();
+        let capacity = if self.test_mode {
+            None
         } else {
-            forgeusb_partition::Scheme::Mbr
+            self.selected_device().map(|d| d.capacity)
         };
         let cancel = Cancellation::default();
+        let message = match mode {
+            MediaMode::Windows => "Building Windows installer media in your cache…",
+            MediaMode::Format => "Formatting a private image of the drive…",
+            MediaMode::Raw => "Decompressing the image into your cache…",
+        };
         self.running = Some(Running {
             cancel: cancel.clone(),
-            progress: forgeusb_core::progress(
-                Stage::Inspecting,
-                0,
-                0,
-                "Preparing Windows media in private staging…",
-            ),
+            progress: forgeusb_core::progress(Stage::Inspecting, 0, 0, message),
             started: Instant::now(),
+            stage_started: Instant::now(),
         });
-        self.status =
-            "Preparing Windows media in private staging; no USB write has started.".into();
+        self.status = format!("{message} Nothing is written to the drive yet.");
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<PreparedMedia> {
@@ -754,42 +1204,120 @@ impl State {
                         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
                     })
                     .ok_or_else(|| {
-                        anyhow::anyhow!("HOME or XDG_CACHE_HOME is required for Windows staging")
+                        anyhow::anyhow!("HOME or XDG_CACHE_HOME is required for staging")
                     })?;
                 anyhow::ensure!(cache.is_absolute(), "cache directory must be absolute");
                 let cache = cache.join("forgeusb");
                 std::fs::create_dir_all(&cache)?;
-                let directory = tempfile::Builder::new()
-                    .prefix("windows-")
-                    .tempdir_in(cache)?;
+                let prefix = match mode {
+                    MediaMode::Windows => "windows-",
+                    MediaMode::Format => "format-",
+                    MediaMode::Raw => "expand-",
+                };
+                let directory = tempfile::Builder::new().prefix(prefix).tempdir_in(cache)?;
                 let output = directory.path().join("prepared.img");
-                let report = forgeusb_media::build_windows_image(
-                    &source,
-                    &output,
-                    &forgeusb_media::BuildOptions {
-                        scheme,
-                        capacity_bytes: None,
-                        timeout: Duration::from_secs(3600),
-                    },
-                    &cancel,
-                    |progress| {
-                        let _ = tx.try_send(WorkerEvent::Progress(progress));
-                    },
-                )?;
+                let emit = |progress| {
+                    let _ = tx.try_send(WorkerEvent::Progress(progress));
+                };
+                let (coverage, summary, expected) = match mode {
+                    MediaMode::Windows => {
+                        let report = forgeusb_media::build_windows_image(
+                            &source,
+                            &output,
+                            &forgeusb_media::BuildOptions {
+                                scheme,
+                                capacity_bytes: capacity,
+                                timeout: Duration::from_secs(7200),
+                                label,
+                                customization,
+                            },
+                            &cancel,
+                            emit,
+                        )?;
+                        let mut summary = format!(
+                            "Built and verified Windows installer media: {} files, {} of data. Windows Setup and Secure Boot are not validated by this step.",
+                            report.files_verified,
+                            size(report.payload_bytes)
+                        );
+                        for c in &report.customizations {
+                            summary += &format!("\nSetup option: {c}");
+                        }
+                        (Coverage::DataRanges, summary, Some((report.image_bytes, report.sha256)))
+                    }
+                    MediaMode::Format => {
+                        let report = forgeusb_media::format_image(
+                            &output,
+                            &forgeusb_media::FormatOptions {
+                                filesystem,
+                                scheme,
+                                capacity_bytes: capacity.unwrap_or(TEST_FORMAT_BYTES),
+                                label,
+                                timeout: Duration::from_secs(3600),
+                            },
+                            &cancel,
+                            emit,
+                        )?;
+                        (
+                            Coverage::DataRanges,
+                            format!("Formatted and checked a {:?} image for the drive.", report.filesystem),
+                            Some((report.image_bytes, report.sha256)),
+                        )
+                    }
+                    MediaMode::Raw => {
+                        let report = forgeusb_media::decompress::decompress_image(
+                            &source,
+                            &output,
+                            capacity.unwrap_or(forgeusb_media::MAX_IMAGE_BYTES),
+                            &cancel,
+                            emit,
+                        )?;
+                        (
+                            Coverage::Full,
+                            format!(
+                                "Expanded {} image to {} (compressed file SHA-256 {}).",
+                                report.compression.name(),
+                                size(report.bytes),
+                                report.source_sha256
+                            ),
+                            None,
+                        )
+                    }
+                };
                 cancel.check()?;
-                let image = forgeusb_image::inspect_cancel(&output, &cancel)?;
+                let image = forgeusb_image::inspect_with(&output, &cancel, coverage)?;
+                if let Some((bytes, sha256)) = expected {
+                    anyhow::ensure!(
+                        image.size == bytes && image.sha256 == sha256,
+                        "prepared image changed before review; prepare it again"
+                    );
+                }
                 anyhow::ensure!(
-                    image.size == report.image_bytes && image.sha256 == report.sha256,
-                    "prepared image changed before review; prepare the source again"
+                    image.bootable_disk,
+                    "the expanded file is not a recognized disk image: {}",
+                    image.warnings.join(" ")
                 );
                 Ok(PreparedMedia {
                     _directory: directory,
                     image,
+                    sized_for: capacity,
+                    summary,
                 })
             })()
             .map_err(|error| format!("{error:#}"));
             let _ = tx.send(WorkerEvent::Prepared(result));
         });
+    }
+
+    /// What the user types to confirm: the drive's short name, or CREATE for a file.
+    fn confirmation_token(plan: &Plan) -> String {
+        match &plan.target_kind {
+            TargetKind::Block(device) => device
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| plan.confirmation.clone()),
+            TargetKind::TestFile => "CREATE".into(),
+        }
     }
 
     fn can_start(&self) -> bool {
@@ -800,12 +1328,14 @@ impl State {
             && self
                 .plan
                 .as_ref()
-                .is_some_and(|p| self.confirmation == p.confirmation)
+                .is_some_and(|p| self.confirmation.trim() == Self::confirmation_token(p))
     }
 
     fn start(&mut self) {
         let plan = self.plan.clone().expect("can_start requires a plan");
-        let confirmation = self.confirmation.clone();
+        // The typed token proves the user named this drive; the engine and
+        // helper still require the plan's exact, identity-bound confirmation.
+        let confirmation = plan.confirmation.clone();
         self.confirm_open = false;
         let cancel = Cancellation::default();
         self.running = Some(Running {
@@ -813,12 +1343,18 @@ impl State {
             progress: Progress {
                 stage: Stage::Revalidating,
                 completed: 0,
-                total: plan.image.size,
+                total: plan.image.transfer_bytes(),
                 message: "Revalidating source and target…".into(),
             },
             started: Instant::now(),
+            stage_started: Instant::now(),
         });
+        self.writing_device = match &plan.target_kind {
+            TargetKind::Block(device) => Some((**device).clone()),
+            TargetKind::TestFile => None,
+        };
         self.error = None;
+        self.done = false;
         self.append_log(
             "Write explicitly confirmed. Source and target will be revalidated before I/O.",
         );
@@ -834,10 +1370,7 @@ impl State {
                             report.verified,
                             "operation returned without read-back verification"
                         );
-                        Ok(format!(
-                            "Verified {} bytes · SHA-256 {}",
-                            report.bytes, report.sha256
-                        ))
+                        Ok(completion_summary(&report))
                     })
                     .map_err(|e| format!("{e:#}"))
                 }
@@ -863,7 +1396,7 @@ impl State {
                     background: Color::from_rgb8(240, 240, 240),
                     text: Color::from_rgb8(0, 0, 0),
                     primary: Color::from_rgb8(0, 102, 204),
-                    success: Color::from_rgb8(6, 176, 37),
+                    success: Color::from_rgb8(6, 140, 37),
                     danger: Color::from_rgb8(165, 28, 28),
                 }
             },
@@ -874,34 +1407,58 @@ impl State {
         Subscription::batch([
             iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick),
             iced::window::close_requests().map(|_| Message::CloseRequested),
-            iced::event::listen_with(|event, _, _| {
-                if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                    key,
-                    modifiers,
-                    ..
-                }) = event
-                {
-                    shortcut(key, modifiers)
-                } else {
-                    None
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key, modifiers, ..
+                }) => shortcut(key, modifiers),
+                iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                    Some(Message::FileDropped(path))
                 }
+                _ => None,
             }),
         ])
     }
 
+    /// One plain sentence telling the user what to do next.
+    fn hint(&self) -> String {
+        if self.done {
+            return self.status.clone();
+        }
+        if !self.test_mode && self.selected.is_none() {
+            return if self.choices.is_empty() {
+                "Plug in a USB drive.".into()
+            } else {
+                "Choose the USB drive to use.".into()
+            };
+        }
+        if self.selected_device().is_some_and(|d| !d.eligible) && !self.test_mode {
+            return "The drive is in use. Press Unmount to continue.".into();
+        }
+        if self.media_mode != MediaMode::Format && self.image_path.trim().is_empty() {
+            return "Choose an image with SELECT, or drop a file on this window.".into();
+        }
+        "Press START. You will review everything before anything is erased.".into()
+    }
+
     fn view(&self) -> Element<'_, Message> {
-        let editable = self.idle() && !self.confirm_open && !self.show_log;
+        let editable = self.editable();
         let mut drive = column![section_title("Drive Properties")].spacing(6);
         let target: Element<'_, Message> = if self.test_mode {
-            let input = text_input("New output file (must not exist)", &self.test_path)
-                .size(12)
-                .padding([2, 5])
-                .style(classic_input)
-                .on_submit(Message::MakePlan);
-            if editable {
-                input.on_input(Message::TestPath).into()
+            if self.editing_test_path && editable {
+                text_input("New output file (must not exist)", &self.test_path)
+                    .id(text_input::Id::new("test-output"))
+                    .size(12)
+                    .padding([2, 5])
+                    .style(classic_input)
+                    .on_input(Message::TestPath)
+                    .on_submit(Message::TestPathDone)
+                    .into()
             } else {
-                input.into()
+                path_box(
+                    self.test_path.clone(),
+                    "New output file (must not exist)",
+                    editable.then_some(Message::EditTestPath),
+                )
             }
         } else if editable {
             pick_list(
@@ -910,9 +1467,9 @@ impl State {
                 Message::ChooseDevice,
             )
             .placeholder(if self.choices.is_empty() {
-                "No USB devices found"
+                "No USB drives found — plug one in"
             } else {
-                "Select a USB device"
+                "Choose a USB drive"
             })
             .text_size(12)
             .padding([2, 5])
@@ -924,7 +1481,7 @@ impl State {
                 self.selected
                     .as_ref()
                     .map(ToString::to_string)
-                    .unwrap_or_else(|| "No USB device selected".into()),
+                    .unwrap_or_else(|| "No USB drive selected".into()),
             )
         };
         drive = drive.push(field(
@@ -935,36 +1492,105 @@ impl State {
             },
             target,
         ));
-        let source = text_input("Disk or ISO image (please select)", &self.image_path)
-            .id(text_input::Id::new("source-image"))
-            .size(12)
-            .padding([2, 5])
-            .style(classic_input)
-            .on_submit(Message::Inspect);
-        let source = if editable {
-            source.on_input(Message::ImagePath)
-        } else {
-            source
-        };
+        if let Some(device) = self.selected_device().filter(|_| !self.test_mode) {
+            let contents = device
+                .partitions
+                .iter()
+                .map(|p| {
+                    let name = p
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| p.filesystem.clone().unwrap_or_else(|| "data".into()));
+                    format!("{name} ({})", size(p.capacity))
+                })
+                .collect::<Vec<_>>();
+            let summary = if contents.is_empty() {
+                "No partitions".to_owned()
+            } else {
+                format!("Contains: {}", contents.join(", "))
+            };
+            if device.eligible {
+                drive = drive.push(text(summary).size(11).style(text::secondary));
+            } else {
+                drive = drive.push(
+                    row![
+                        text(format!(
+                            "{summary}. It is mounted, so it can't be written yet."
+                        ))
+                        .size(11)
+                        .width(Fill),
+                        button(text("Unmount").size(12))
+                            .padding([2, 10])
+                            .style(classic_button)
+                            .on_press_maybe(editable.then_some(Message::Unmount)),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center),
+                );
+            }
+        }
+        let can_browse = editable && self.media_mode != MediaMode::Format;
+        let source = path_box(
+            if self.media_mode == MediaMode::Format {
+                String::new()
+            } else {
+                self.image_path.trim().to_owned()
+            },
+            if self.media_mode == MediaMode::Format {
+                "Not needed to format a drive"
+            } else {
+                "Click SELECT, or drop an image file on this window"
+            },
+            can_browse.then_some(Message::BrowseImage),
+        );
         drive = drive.push(field(
             "Boot selection",
             row![
-                container(source).width(Fill).clip(true),
+                source,
                 button(text("SELECT").size(12).center())
                     .width(96)
                     .padding([2, 8])
                     .style(classic_button)
-                    .on_press_maybe(editable.then_some(Message::BrowseImage)),
+                    .on_press_maybe(can_browse.then_some(Message::BrowseImage)),
             ]
             .spacing(8)
             .align_y(iced::Center),
         ));
+        if let Some(image) = self
+            .image
+            .as_ref()
+            .filter(|_| self.media_mode != MediaMode::Format)
+        {
+            let shown = if self.prepared.is_some() && self.media_mode == MediaMode::Windows {
+                "Prepared Windows media".to_owned()
+            } else {
+                kind_name(image)
+            };
+            drive = drive.push(
+                row![
+                    text(format!(
+                        "{shown} · {} · SHA-256 {}…",
+                        size(image.size),
+                        &image.sha256[..12.min(image.sha256.len())]
+                    ))
+                    .size(11)
+                    .style(text::secondary)
+                    .width(Fill),
+                    button(text("Checksums…").size(11))
+                        .padding([1, 6])
+                        .style(classic_button)
+                        .on_press_maybe(editable.then_some(Message::ShowChecksums)),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            );
+        }
         drive = drive.push(field(
             "Image option",
             if editable {
                 Element::from(
                     pick_list(
-                        [MediaMode::Raw, MediaMode::WindowsMbr, MediaMode::WindowsGpt],
+                        [MediaMode::Raw, MediaMode::Windows, MediaMode::Format],
                         Some(self.media_mode),
                         Message::MediaMode,
                     )
@@ -977,22 +1603,31 @@ impl State {
                 readonly(self.media_mode.to_string())
             },
         ));
+        let scheme: Element<'_, Message> = if self.media_mode == MediaMode::Raw {
+            readonly("From image")
+        } else if editable {
+            pick_list(
+                [SchemeChoice::Mbr, SchemeChoice::Gpt],
+                Some(self.scheme),
+                Message::Scheme,
+            )
+            .text_size(12)
+            .padding([2, 5])
+            .width(Fill)
+            .style(classic_pick_list)
+            .into()
+        } else {
+            readonly(self.scheme.to_string())
+        };
         drive = drive.push(
             row![
-                field(
-                    "Partition scheme",
-                    readonly(match self.media_mode {
-                        MediaMode::Raw => "From image",
-                        MediaMode::WindowsMbr => "MBR",
-                        MediaMode::WindowsGpt => "GPT",
-                    })
-                ),
+                field("Partition scheme", scheme),
                 field(
                     "Target system",
-                    readonly(if self.media_mode == MediaMode::Raw {
-                        "From image"
-                    } else {
-                        "UEFI"
+                    readonly(match self.media_mode {
+                        MediaMode::Raw => "From image",
+                        MediaMode::Windows => "UEFI",
+                        MediaMode::Format => "None (data only)",
                     })
                 ),
             ]
@@ -1014,34 +1649,31 @@ impl State {
             ),
         );
         if self.advanced {
-            let file_mode = checkbox("Use a disposable image file", self.test_mode)
-                .size(14)
-                .text_size(12);
+            let file_mode = checkbox(
+                "Use a disposable image file instead of a drive",
+                self.test_mode,
+            )
+            .size(14)
+            .text_size(12);
             drive = drive.push(if editable {
                 file_mode.on_toggle(Message::TestMode)
             } else {
                 file_mode
             });
             if let Some(image) = &self.image {
-                drive = drive
-                    .push(text(format!("{:?} image, {}", image.kind, size(image.size))).size(11));
                 drive = drive.push(
                     text(format!("SHA-256: {}", image.sha256))
                         .size(10)
                         .font(Font::MONOSPACE),
                 );
                 for warning in &image.warnings {
-                    drive = drive.push(text(warning).size(11).style(text::danger));
+                    drive = drive.push(text(warning).size(11).style(text::secondary));
                 }
             }
-            if let Some(device) = self.selected.as_ref().and_then(|selected| {
-                self.devices
-                    .iter()
-                    .find(|device| device.path == selected.path)
-            }) {
+            if let Some(device) = self.selected_device() {
                 drive = drive.push(
                     text(format!(
-                        "{} {} — {} bytes\n{}:{}; serial {}",
+                        "{} {} — {} bytes, {}:{}, serial {}",
                         device.vendor,
                         device.model,
                         device.capacity,
@@ -1051,29 +1683,15 @@ impl State {
                     ))
                     .size(11),
                 );
-                for partition in &device.partitions {
-                    drive = drive.push(
-                        text(format!(
-                            "{}: {}, {}",
-                            partition.path.display(),
-                            partition
-                                .filesystem
-                                .as_deref()
-                                .unwrap_or("unknown filesystem"),
-                            if partition.mounts.is_empty() {
-                                "unmounted".into()
-                            } else {
-                                partition.mounts.join(", ")
-                            }
-                        ))
-                        .size(11),
-                    );
-                }
             }
-            for device in self.devices.iter().filter(|device| !device.eligible) {
+            for device in self
+                .devices
+                .iter()
+                .filter(|device| !device.eligible && !device.blocked_only_by_mounts)
+            {
                 drive = drive.push(
                     text(format!(
-                        "{}: {}",
+                        "Not offered: {} — {}",
                         device.path.display(),
                         device.reasons.join("; ")
                     ))
@@ -1083,60 +1701,73 @@ impl State {
             }
         }
 
+        let label: Element<'_, Message> = if self.media_mode == MediaMode::Raw {
+            readonly("From image")
+        } else {
+            let input = text_input("Volume label", &self.label)
+                .size(12)
+                .padding([2, 5])
+                .style(classic_input);
+            if editable {
+                input.on_input(Message::Label).into()
+            } else {
+                input.into()
+            }
+        };
+        let filesystem: Element<'_, Message> = match self.media_mode {
+            MediaMode::Raw => readonly("From image"),
+            MediaMode::Windows => readonly("FAT32"),
+            MediaMode::Format if editable => {
+                pick_list(FsChoice::ALL, Some(self.filesystem), Message::Filesystem)
+                    .text_size(12)
+                    .padding([2, 5])
+                    .width(Fill)
+                    .style(classic_pick_list)
+                    .into()
+            }
+            MediaMode::Format => readonly(self.filesystem.to_string()),
+        };
         let mut format = column![
             section_title("Format Options"),
-            field(
-                "Volume label",
-                readonly(if self.media_mode == MediaMode::Raw {
-                    "Preserve image label"
-                } else {
-                    "FORGEUSB"
-                })
-            ),
-            row![
-                field(
-                    "File system",
-                    readonly(if self.media_mode == MediaMode::Raw {
-                        "From image"
-                    } else {
-                        "FAT32"
-                    })
-                ),
-                field(
-                    "Cluster size",
-                    readonly(if self.media_mode == MediaMode::Raw {
-                        "From image"
-                    } else {
-                        "Automatic"
-                    })
-                )
-            ]
-            .spacing(36),
+            field("Volume label", label),
+            field("File system", filesystem),
+            checkbox(
+                "Safely remove the drive when finished",
+                self.eject_when_done
+            )
+            .size(14)
+            .text_size(12)
+            .on_toggle(Message::EjectWhenDone),
+        ]
+        .spacing(6);
+        if self.media_mode == MediaMode::Windows {
+            format = format.push(self.windows_options(editable));
+        }
+        format = format.push(
             button(
                 text(if self.advanced_format {
                     "Hide advanced format options"
                 } else {
                     "Show advanced format options"
                 })
-                .size(12)
+                .size(12),
             )
             .padding([1, 0])
             .style(button::text)
             .on_press_maybe(
-                (!self.confirm_open && !self.show_log).then_some(Message::ToggleAdvancedFormat)
+                (!self.confirm_open && !self.show_log).then_some(Message::ToggleAdvancedFormat),
             ),
-        ]
-        .spacing(6);
+        );
         if self.advanced_format {
             format = format.push(
-                checkbox("Verify written image (required)", true)
+                checkbox("Verify written data by reading it back (always on)", true)
                     .size(14)
                     .text_size(12),
             );
-            format = format.push(text(if self.media_mode == MediaMode::Raw {
-                "DD mode preserves the image's partitions, filesystem, label and bootloader. Read-back checks the source image range."
-            } else {
-                "Windows mode extracts and verifies a private FAT32 image, splits oversized install.wim with wimlib, then asks you to review the USB write. MBR and GPT options both target UEFI. Secure Boot depends on the original loader and firmware trust."
+            format = format.push(text(match self.media_mode {
+                MediaMode::Raw => "Disk image mode copies the image exactly: its partitions, file systems, label and boot loaders. Compressed images are expanded in your cache first.",
+                MediaMode::Windows => "Windows mode copies the installer into a FAT32 partition sized to the drive, splits a large install.wim, verifies every file, then asks you to confirm the write. MBR and GPT both boot with UEFI. Secure Boot depends on the original loaders and the PC's firmware.",
+                MediaMode::Format => "Format mode builds an empty file system sized to the drive. Unused space is not written, so it is fast even on large drives. No boot loader is installed.",
             }).size(11));
             format = format.push(
                 checkbox("Dark theme", self.dark)
@@ -1150,15 +1781,27 @@ impl State {
             && self
                 .image
                 .as_ref()
-                .is_some_and(|image| !image.bootable_disk)
+                .is_some_and(|image| !image.bootable_disk && image.kind != ImageKind::Compressed)
         {
-            content = content.push(text("This image cannot be written in DD mode. Select an ISOHybrid/disk image, or choose Windows installer mode for Windows media.").size(12).style(text::danger));
+            content = content.push(text("This image can't be written as-is: it has no USB boot layout. Use a vendor USB image or a hybrid ISO; for Windows ISOs choose \"Windows installer\".").size(12).style(text::danger));
         }
         if let Some(error) = self.error.as_ref().or(self.discovery_error.as_ref()) {
             content = content.push(
-                text(error.chars().take(600).collect::<String>())
-                    .size(12)
-                    .style(text::danger),
+                container(
+                    text(error.chars().take(600).collect::<String>())
+                        .size(12)
+                        .style(text::danger),
+                )
+                .padding(6)
+                .width(Fill)
+                .style(|theme: &Theme| container::Style {
+                    border: iced::Border {
+                        color: theme.palette().danger,
+                        width: 1.0,
+                        radius: 0.0.into(),
+                    },
+                    ..Default::default()
+                }),
             );
         }
         let progress = self.running.as_ref().map(|running| &running.progress);
@@ -1170,26 +1813,24 @@ impl State {
                     (value.completed as f64 / value.total as f64 * 100.0).clamp(0.0, 100.0) as f32
                 }
             })
-            .unwrap_or(if self.status.starts_with("Verified ") {
-                100.0
-            } else {
-                0.0
-            });
+            .unwrap_or(if self.done { 100.0 } else { 0.0 });
         let bar_label = if let Some(running) = &self.running {
             if running.cancel.is_cancelled() {
                 "CANCELLING".into()
             } else {
-                format!("{}: {:.1}%", stage_name(running.progress.stage), percent)
+                format!("{} {:.0}%", stage_name(running.progress.stage), percent)
             }
         } else if self.picking {
             "SELECT AN IMAGE".into()
         } else if self.inspecting {
             "ANALYZING IMAGE".into()
         } else if self.planning {
-            "PREPARING OPERATION".into()
+            "PREPARING".into()
+        } else if self.unmounting {
+            "UNMOUNTING".into()
         } else if self.error.is_some() || self.discovery_error.is_some() {
             "ERROR".into()
-        } else if self.status.starts_with("Verified ") {
+        } else if self.done {
             "DONE".into()
         } else {
             "READY".into()
@@ -1258,32 +1899,20 @@ impl State {
         .spacing(8)
         .align_y(iced::Center);
         let bottom = if self.discovery_error.is_some() && self.error.is_none() && self.idle() {
-            "Device discovery failed — reconnect or refresh".into()
+            "Couldn't read the list of drives — reconnect the drive or press Refresh".into()
         } else if self.running.is_some()
             || self.planning
             || self.inspecting
+            || self.unmounting
             || self.error.is_some()
-            || self.status.starts_with("Verified ")
         {
-            ellipsize(&self.status, 58)
-        } else if self.test_mode {
-            "Disposable file mode — new files only".into()
+            ellipsize(&self.status, 64)
+        } else if self.test_mode && !self.done {
+            "Disposable file mode — creates new files only".into()
         } else {
-            format!("{} USB device(s) found", self.choices.len())
+            ellipsize(&self.hint(), 64)
         };
-        let elapsed = self
-            .running
-            .as_ref()
-            .map(|running| {
-                let seconds = running.started.elapsed().as_secs();
-                format!(
-                    "{:02}:{:02}:{:02}",
-                    seconds / 3600,
-                    seconds / 60 % 60,
-                    seconds % 60
-                )
-            })
-            .unwrap_or_default();
+        let timing = self.running.as_ref().map(rate_and_eta).unwrap_or_default();
         let footer = column![
             section_title("Status"),
             progress_widget,
@@ -1302,7 +1931,7 @@ impl State {
             .height(Fill),
             container(footer).padding([10, 14]),
             horizontal_rule(1),
-            container(row![text(bottom).size(11).width(Fill), text(elapsed).size(11)].spacing(8))
+            container(row![text(bottom).size(11).width(Fill), text(timing).size(11)].spacing(8))
                 .padding([5, 7]),
         ])
         .width(Fill)
@@ -1311,6 +1940,8 @@ impl State {
         .into();
         if self.confirm_open && self.plan.is_some() {
             modal(base, self.confirmation_view())
+        } else if let Some(view) = &self.checksums {
+            modal(base, self.checksum_view(view))
         } else if self.show_log {
             let lines = self.log.iter().fold(column![].spacing(6), |lines, line| {
                 lines.push(text(line).size(11))
@@ -1336,34 +1967,235 @@ impl State {
         }
     }
 
+    fn windows_options(&self, editable: bool) -> Element<'_, Message> {
+        let option = |label: String, on: bool, which: WindowsOption| {
+            let c = checkbox(label, on).size(14).text_size(12);
+            if editable {
+                c.on_toggle(move |v| Message::WindowsOption(which, v))
+            } else {
+                c
+            }
+        };
+        let account = text_input("account name", &self.account_name)
+            .size(12)
+            .padding([1, 4])
+            .width(150)
+            .style(classic_input);
+        let account = if editable && self.windows.local_account.is_some() {
+            account.on_input(Message::AccountName)
+        } else {
+            account
+        };
+        let regional_label = match &self.host_locale {
+            Some(tag) => format!("Use this computer's regional settings ({tag})"),
+            None => "Use this computer's regional settings (not detected)".into(),
+        };
+        let mut regional = checkbox(regional_label, self.windows.regional.is_some())
+            .size(14)
+            .text_size(12);
+        if editable && self.host_locale.is_some() {
+            regional = regional.on_toggle(|v| Message::WindowsOption(WindowsOption::Regional, v));
+        }
+        let mut panel = column![
+            text("Windows setup options").size(12).font(Font {
+                weight: iced::font::Weight::Bold,
+                ..Font::DEFAULT
+            }),
+            option(
+                "Remove the TPM 2.0, Secure Boot and 4 GB RAM requirements".into(),
+                self.windows.bypass_requirements,
+                WindowsOption::Requirements
+            ),
+            option(
+                "Allow setup without a Microsoft account".into(),
+                self.windows.bypass_online_account,
+                WindowsOption::OnlineAccount
+            ),
+            row![
+                option(
+                    "Create a local account named".into(),
+                    self.windows.local_account.is_some(),
+                    WindowsOption::LocalAccount
+                ),
+                account
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+            regional,
+            option(
+                "Decline optional data collection (privacy questions)".into(),
+                self.windows.disable_data_collection,
+                WindowsOption::DataCollection
+            ),
+            option(
+                "Turn off automatic BitLocker drive encryption".into(),
+                self.windows.disable_bitlocker,
+                WindowsOption::BitLocker
+            ),
+        ]
+        .spacing(5);
+        if self.windows.local_account.is_some() {
+            let name = self.account_name.trim();
+            let note = if name.is_empty() {
+                "Type an account name. Windows asks for its password at first sign-in.".to_owned()
+            } else if let Err(e) = forgeusb_windows::unattend::validate_account(name) {
+                format!("{e}")
+            } else {
+                "Windows asks for this account's password at first sign-in.".to_owned()
+            };
+            panel = panel.push(text(note).size(11).style(text::secondary));
+        }
+        container(panel)
+            .padding(8)
+            .width(Fill)
+            .style(|theme: &Theme| container::Style {
+                border: iced::Border {
+                    color: Color::from_rgb8(170, 170, 170),
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..dialog_background(theme)
+            })
+            .into()
+    }
+
+    fn checksum_view<'a>(&'a self, view: &'a ChecksumView) -> Element<'a, Message> {
+        let mut body = column![text("Checksums").size(18)].spacing(10);
+        body = body.push(text(ellipsize(self.image_path.trim(), 70)).size(11));
+        if view.computing {
+            body = body.push(text("Reading the whole file…").size(12));
+        } else if let Some(error) = &view.error {
+            body = body.push(text(error).size(12).style(text::danger));
+        }
+        if let Some(sums) = &view.result {
+            for (name, value) in [
+                ("MD5", &sums.md5),
+                ("SHA-1", &sums.sha1),
+                ("SHA-256", &sums.sha256),
+                ("SHA-512", &sums.sha512),
+            ] {
+                body = body.push(
+                    column![
+                        text(name).size(11),
+                        text_input("", value)
+                            .size(10)
+                            .font(Font::MONOSPACE)
+                            .padding([2, 4])
+                            .style(classic_input),
+                    ]
+                    .spacing(2),
+                );
+            }
+            body = body.push(
+                text_input("Paste the publisher's checksum to compare", &view.expected)
+                    .size(11)
+                    .padding([3, 5])
+                    .style(classic_input)
+                    .on_input(Message::ExpectedChecksum),
+            );
+            if let Some(p) = &view.published
+                && p.digest == view.expected
+            {
+                body = body.push(
+                    text(format!("Found in {}", p.list.display()))
+                        .size(11)
+                        .style(text::secondary),
+                );
+            }
+            if !view.expected.trim().is_empty() {
+                body = body.push(match sums.matches(&view.expected) {
+                    Some(alg) => text(format!("✓ {alg} matches — this is the published file."))
+                        .size(12)
+                        .style(text::success),
+                    None => text("✗ No match — the file differs from the published one, or the checksum is for another file.")
+                        .size(12)
+                        .style(text::danger),
+                });
+            }
+        }
+        body.push(row![
+            iced::widget::Space::with_width(Fill),
+            button(text("CLOSE").size(12))
+                .style(classic_button)
+                .padding([4, 18])
+                .on_press(Message::CloseChecksums)
+        ])
+        .into()
+    }
+
     fn confirmation_view(&self) -> Element<'_, Message> {
         let plan = self.plan.as_ref().expect("confirmation requires a plan");
-        let physical = matches!(plan.target_kind, TargetKind::Block(_));
-        let mut details = column![
-            text(if physical {
-                "All data on this device will be destroyed."
-            } else {
-                "Create a new disposable image file."
-            })
-            .size(13),
+        let token = Self::confirmation_token(plan);
+        let mut details = column![].spacing(6);
+        let headline = match &plan.target_kind {
+            TargetKind::Block(device) => {
+                let mut lines = vec![format!(
+                    "{} ({}, {})",
+                    device_model(device),
+                    drive_size(device.capacity),
+                    device.path.display()
+                )];
+                for p in &device.partitions {
+                    lines.push(format!(
+                        "  • {} {} — {}",
+                        p.label
+                            .as_deref()
+                            .map(|l| format!("\"{l}\""))
+                            .unwrap_or_else(|| "partition".into()),
+                        p.filesystem.as_deref().unwrap_or(""),
+                        size(p.capacity)
+                    ));
+                }
+                details = details.push(
+                    text("Everything on this drive will be erased:")
+                        .size(13)
+                        .style(text::danger),
+                );
+                lines.join("\n")
+            }
+            TargetKind::TestFile => {
+                details =
+                    details.push(text("A new disposable image file will be created:").size(13));
+                plan.target.display().to_string()
+            }
+        };
+        details = details.push(text(headline).size(12));
+        let what = match (self.media_mode, &self.prepared) {
+            (MediaMode::Windows, Some(_)) => format!(
+                "Windows installer from {}",
+                file_name(self.image_path.trim())
+            ),
+            (MediaMode::Format, _) => {
+                format!("Empty {} drive \"{}\"", self.filesystem, self.label.trim())
+            }
+            _ => format!(
+                "{} ({})",
+                file_name(self.image_path.trim()),
+                kind_name(&plan.image)
+            ),
+        };
+        details = details.push(
             text(format!(
-                "Image: {}\nTarget: {}\nImage size: {} bytes\nCapacity: {} bytes",
-                plan.image.path.display(),
-                plan.target.display(),
-                plan.image.size,
-                plan.capacity
+                "Writes: {what}\n{} of data, then reads it all back to verify.",
+                size(plan.image.transfer_bytes())
             ))
             .size(12),
-            text("Write image, flush, then verify every source byte by read-back.").size(12),
-        ]
-        .spacing(8);
-        if self.prepared.is_some() {
-            details = details.push(text(format!("Prepared from: {}\nWindows Setup, physical boot and Secure Boot require separate validation.", self.image_path)).size(11));
+        );
+        if self.media_mode == MediaMode::Windows {
+            let c = self.customization();
+            for item in c.summary() {
+                details = details.push(text(format!("Setup option: {item}")).size(11));
+            }
+            details = details.push(
+                text("Windows Setup, physical boot and Secure Boot are not tested by ForgeUSB.")
+                    .size(11)
+                    .style(text::secondary),
+            );
         }
         for warning in &plan.warnings {
-            details = details.push(text(warning).size(11));
+            details = details.push(text(warning).size(10).style(text::secondary));
         }
-        let confirm = text_input("Type the exact confirmation above", &self.confirmation)
+        let confirm = text_input(&format!("Type {token} to confirm"), &self.confirmation)
             .id(text_input::Id::new("confirmation"))
             .size(12)
             .padding([5, 6])
@@ -1371,11 +2203,23 @@ impl State {
             .on_input(Message::Confirmation)
             .on_submit(Message::Start);
         column![
-            text("Confirm operation").size(18),
-            scrollable(details).height(190),
+            text(match plan.target_kind {
+                TargetKind::Block(_) => "Erase this drive?",
+                TargetKind::TestFile => "Create this file?",
+            })
+            .size(18),
+            scrollable(container(details).padding(iced::Padding {
+                right: 14.0,
+                ..iced::Padding::ZERO
+            }))
+            .height(210),
             horizontal_rule(1),
-            text("To confirm the model, path and capacity, type:").size(12),
-            text(&plan.confirmation).size(12).font(Font::MONOSPACE),
+            row![
+                text("To confirm, type").size(12),
+                text(token.clone()).size(12).font(Font::MONOSPACE),
+                text("below:").size(12)
+            ]
+            .spacing(4),
             confirm,
             row![
                 iced::widget::Space::with_width(Fill),
@@ -1397,6 +2241,87 @@ impl State {
     }
 }
 
+fn completion_summary(report: &forgeusb_linux::Report) -> String {
+    let mut summary = format!(
+        "Verified {} ({} written) · SHA-256 {}",
+        size(report.bytes),
+        size(if report.written == 0 {
+            report.bytes
+        } else {
+            report.written
+        }),
+        &report.sha256[..16.min(report.sha256.len())]
+    );
+    for note in &report.notes {
+        summary += &format!(" · {note}");
+    }
+    summary
+}
+
+fn rate_and_eta(running: &Running) -> String {
+    let p = &running.progress;
+    let elapsed = running.stage_started.elapsed().as_secs_f64();
+    let total = running.started.elapsed().as_secs();
+    let clock = format!(
+        "{:02}:{:02}:{:02}",
+        total / 3600,
+        total / 60 % 60,
+        total % 60
+    );
+    if elapsed < 1.5 || p.completed == 0 || p.total == 0 {
+        return clock;
+    }
+    let rate = p.completed as f64 / elapsed;
+    let remaining = (p.total.saturating_sub(p.completed)) as f64 / rate;
+    let eta = if remaining >= 90.0 {
+        format!("{:.0} min left", remaining / 60.0)
+    } else {
+        format!("{remaining:.0} s left")
+    };
+    match p.stage {
+        Stage::Writing | Stage::Verifying => {
+            format!("{}/s · {eta} · {clock}", size(rate as u64))
+        }
+        _ => clock,
+    }
+}
+
+fn device_model(d: &Device) -> String {
+    let model = [d.vendor.trim(), d.model.trim()]
+        .into_iter()
+        .filter(|s| !s.is_empty() && *s != "Unknown")
+        .collect::<Vec<_>>()
+        .join(" ");
+    if model.is_empty() {
+        "USB drive".into()
+    } else {
+        model
+    }
+}
+
+fn drive_size(n: u64) -> String {
+    let gb = n as f64 / 1e9;
+    if gb >= 10.0 {
+        format!("{gb:.0} GB")
+    } else {
+        format!("{gb:.1} GB")
+    }
+}
+
+fn kind_name(image: &ImageInfo) -> String {
+    match image.kind {
+        ImageKind::Disk => "Disk image",
+        ImageKind::IsoHybrid => "Hybrid ISO",
+        ImageKind::OpticalIso if image.windows => "Windows installer ISO",
+        ImageKind::OpticalIso => "ISO (not USB-bootable as-is)",
+        ImageKind::Udf if image.windows => "Windows installer ISO",
+        ImageKind::Udf => "UDF image",
+        ImageKind::Compressed => "Compressed image",
+        ImageKind::Unknown => "Unrecognized file",
+    }
+    .into()
+}
+
 fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![text(label).size(12), control.into()]
         .spacing(3)
@@ -1406,11 +2331,81 @@ fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elemen
 
 fn readonly<'a>(value: impl Into<String>) -> Element<'a, Message> {
     let value = value.into();
-    text_input("", &value)
-        .size(12)
+    path_box(value, "", None)
+}
+
+/// A path shown to fit its box, keeping the file name visible. Long text
+/// inputs overdraw neighbouring controls with the tiny-skia renderer, so
+/// paths are displayed rather than edited in place.
+fn path_box<'a>(
+    value: String,
+    placeholder: &'a str,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    let enabled = on_press.is_some();
+    let content = iced::widget::responsive(move |size| {
+        // Conservative average advance for 12 px Noto Sans.
+        let fit = ((size.width / 6.8) as usize).max(12);
+        let (shown, secondary) = if value.is_empty() {
+            (placeholder.to_owned(), true)
+        } else {
+            (middle_ellipsize(&value, fit), !enabled)
+        };
+        let label = text(shown).size(12).wrapping(text::Wrapping::None);
+        if secondary {
+            label.style(text::secondary).into()
+        } else {
+            label.into()
+        }
+    });
+    let boxed = container(content)
         .padding([2, 5])
-        .style(classic_input)
-        .into()
+        .width(Fill)
+        .height(20)
+        .style(move |theme: &Theme| {
+            let input = classic_input(
+                theme,
+                if enabled {
+                    text_input::Status::Active
+                } else {
+                    text_input::Status::Disabled
+                },
+            );
+            container::Style {
+                background: Some(input.background),
+                border: input.border,
+                ..Default::default()
+            }
+        });
+    let area = iced::widget::mouse_area(boxed);
+    match on_press {
+        Some(message) => area
+            .on_press(message)
+            .interaction(iced::mouse::Interaction::Pointer)
+            .into(),
+        None => area.into(),
+    }
+}
+
+fn file_name(path: &str) -> String {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned());
+    ellipsize(&name, 60)
+}
+
+fn middle_ellipsize(value: &str, limit: usize) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= limit {
+        return value.to_owned();
+    }
+    let tail = (limit * 2 / 3).max(1);
+    let head = limit.saturating_sub(tail + 1);
+    let mut result: String = chars[..head].iter().collect();
+    result.push('…');
+    result.extend(&chars[chars.len() - tail..]);
+    result
 }
 
 fn section_title<'a>(title: &'a str) -> Element<'a, Message> {
@@ -1820,10 +2815,7 @@ fn helper_write(
                         && report.bytes == plan.image.size
                         && report.sha256 == plan.image.sha256
                     {
-                        complete = Some(format!(
-                            "Verified {} bytes · SHA-256 {}",
-                            report.bytes, report.sha256
-                        ));
+                        complete = Some(completion_summary(&report));
                     } else {
                         failure = Some("Helper completion does not match the confirmed image or lacks verification".into());
                     }
@@ -1887,6 +2879,7 @@ mod tests {
             partitions: Vec::new(),
             removable: true,
             transport: "usb".into(),
+            blocked_only_by_mounts: false,
         }
     }
 
@@ -1903,6 +2896,8 @@ mod tests {
                 el_torito: false,
                 windows: false,
                 warnings: Vec::new(),
+                coverage: Coverage::Full,
+                ranges: Vec::new(),
                 stamp: FileStamp {
                     device: 0,
                     inode: 0,
@@ -1970,11 +2965,14 @@ mod tests {
     fn start_requires_exact_confirmation_and_smoke_mode_forbids_it() {
         let mut state = State::empty(Options::default());
         let plan = plan();
-        state.confirmation = format!("{} ", plan.confirmation);
+        state.confirmation = "CREAT".into();
         state.plan = Some(plan.clone());
         state.confirm_open = true;
         assert!(!state.can_start());
+        // The long engine confirmation is not what the user types.
         state.confirmation = plan.confirmation;
+        assert!(!state.can_start());
+        state.confirmation = " CREATE ".into();
         assert!(state.can_start());
         state.smoke_started = Some(Instant::now());
         assert!(!state.can_start());
@@ -2011,9 +3009,8 @@ mod tests {
     #[test]
     fn dismissing_confirmation_revokes_the_plan() {
         let mut state = State::empty(Options::default());
-        let plan = plan();
-        state.confirmation = plan.confirmation.clone();
-        state.plan = Some(plan);
+        state.confirmation = "CREATE".into();
+        state.plan = Some(plan());
         state.confirm_open = true;
         assert!(state.can_start());
         let _ = state.update(Message::DismissPlan);
@@ -2049,11 +3046,11 @@ mod tests {
         state.confirmation = "stale confirmation".into();
         // Settings are unavailable until the existing review is dismissed.
         state.confirm_open = true;
-        let _ = state.update(Message::MediaMode(MediaMode::WindowsGpt));
+        let _ = state.update(Message::MediaMode(MediaMode::Windows));
         assert_eq!(state.media_mode, MediaMode::Raw);
         let _ = state.update(Message::DismissPlan);
-        let _ = state.update(Message::MediaMode(MediaMode::WindowsGpt));
-        assert_eq!(state.media_mode, MediaMode::WindowsGpt);
+        let _ = state.update(Message::MediaMode(MediaMode::Windows));
+        assert_eq!(state.media_mode, MediaMode::Windows);
         assert!(state.plan.is_none() && state.confirmation.is_empty());
         assert!(state.can_plan());
         state.smoke_started = Some(Instant::now());
@@ -2065,12 +3062,13 @@ mod tests {
     fn close_during_preparation_cancels_before_any_target_review() {
         let mut state = State::empty(Options::default());
         let cancel = Cancellation::default();
-        state.media_mode = MediaMode::WindowsMbr;
+        state.media_mode = MediaMode::Windows;
         state.planning = true;
         state.running = Some(Running {
             cancel: cancel.clone(),
             progress: forgeusb_core::progress(Stage::Inspecting, 0, 0, "Preparing"),
             started: Instant::now(),
+            stage_started: Instant::now(),
         });
         let _ = state.update(Message::CloseRequested);
         assert!(cancel.is_cancelled());
@@ -2091,10 +3089,13 @@ mod tests {
             cancel,
             progress: forgeusb_core::progress(Stage::Writing, 1, 1, "Prepared"),
             started: Instant::now(),
+            stage_started: Instant::now(),
         });
         let prepared = PreparedMedia {
             _directory: tempfile::tempdir().unwrap(),
             image: plan().image,
+            sized_for: None,
+            summary: String::new(),
         };
         state.worker_event(WorkerEvent::Prepared(Ok(prepared)));
         assert!(state.prepared.is_none() && state.plan.is_none());
@@ -2112,11 +3113,96 @@ mod tests {
             cancel: Cancellation::default(),
             progress: forgeusb_core::progress(Stage::Writing, 0, 0, "Preparing"),
             started: Instant::now(),
+            stage_started: Instant::now(),
         });
         state.worker_event(WorkerEvent::Devices(Ok(Vec::new())));
         assert!(state.selected.is_none());
         assert!(state.plan.is_none() && !state.confirm_open);
         state.worker_event(WorkerEvent::Devices(Ok(vec![device()])));
         assert!(state.selected.is_none());
+    }
+
+    #[test]
+    fn physical_confirmation_is_the_drive_short_name() {
+        let mut plan = plan();
+        let mut device = device();
+        device.path = PathBuf::from("/dev/sdz");
+        plan.target = device.path.clone();
+        plan.target_kind = TargetKind::Block(Box::new(device));
+        assert_eq!(State::confirmation_token(&plan), "sdz");
+    }
+
+    #[test]
+    fn mounted_usb_drive_is_offered_but_cannot_be_planned_until_unmounted() {
+        let mut state = State::empty(Options::default());
+        let mut mounted = device();
+        mounted.eligible = false;
+        mounted.blocked_only_by_mounts = true;
+        mounted.reasons = vec!["mounted".into()];
+        let mut internal = device();
+        internal.path = PathBuf::from("/dev/forgeusb-internal-never-open");
+        internal.eligible = false;
+        internal.reasons = vec!["not USB".into()];
+        state.worker_event(WorkerEvent::Devices(Ok(vec![mounted, internal])));
+        assert_eq!(state.choices.len(), 1);
+        assert!(state.choices[0].label.ends_with("(mounted)"));
+        state.image_path = "/tmp/never-opened-source.img".into();
+        let _ = state.update(Message::ChooseDevice(state.choices[0].clone()));
+        assert!(state.selected.is_some());
+        assert!(!state.can_plan());
+        assert!(state.hint().contains("Unmount"));
+    }
+
+    #[test]
+    fn format_mode_needs_no_source_and_always_prepares() {
+        let mut state = State::empty(Options::default());
+        state.test_mode = true;
+        state.test_path = "/tmp/never-created-format.img".into();
+        let _ = state.update(Message::MediaMode(MediaMode::Format));
+        assert!(state.needs_preparation());
+        assert!(state.can_plan());
+        let _ = state.update(Message::Filesystem(FsChoice::Fat32));
+        let _ = state.update(Message::Label("my stick/2026".into()));
+        assert_eq!(state.label, "MY STICK_20");
+        let _ = state.update(Message::Filesystem(FsChoice::Ext4));
+        let _ = state.update(Message::Label("a very long ext4 label".into()));
+        assert_eq!(state.label, "a very long ext4");
+    }
+
+    #[test]
+    fn windows_detection_switches_mode_and_account_name_is_applied() {
+        let mut state = State::empty(Options::default());
+        let mut image = plan().image;
+        image.kind = ImageKind::Udf;
+        image.bootable_disk = false;
+        image.windows = true;
+        state.inspecting = true;
+        state.worker_event(WorkerEvent::Inspected(Ok(image)));
+        assert_eq!(state.media_mode, MediaMode::Windows);
+        let _ = state.update(Message::WindowsOption(WindowsOption::LocalAccount, true));
+        let _ = state.update(Message::AccountName("  alex ".into()));
+        assert_eq!(state.customization().local_account.as_deref(), Some("alex"));
+        let _ = state.update(Message::WindowsOption(WindowsOption::LocalAccount, false));
+        assert!(state.customization().local_account.is_none());
+    }
+
+    #[test]
+    fn long_paths_keep_their_file_name() {
+        let path = "/home/user/Downloads/very/deeply/nested/folder/Win11_24H2_English_x64.iso";
+        let shown = middle_ellipsize(path, 40);
+        assert_eq!(shown.chars().count(), 40);
+        assert!(shown.ends_with("Win11_24H2_English_x64.iso"));
+        assert_eq!(middle_ellipsize("/short.img", 40), "/short.img");
+    }
+
+    #[test]
+    fn rate_estimate_needs_progress() {
+        let running = Running {
+            cancel: Cancellation::default(),
+            progress: forgeusb_core::progress(Stage::Writing, 0, 100, "Writing"),
+            started: Instant::now(),
+            stage_started: Instant::now(),
+        };
+        assert_eq!(rate_and_eta(&running), "00:00:00");
     }
 }

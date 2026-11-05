@@ -165,6 +165,8 @@ def run_child(args: argparse.Namespace) -> dict:
     env["WINIT_UNIX_BACKEND"] = "x11"
     env["QT_QPA_PLATFORM"] = "xcb"
     screenshots = []
+    settings_home = tempfile.TemporaryDirectory(prefix="forgeusb-gui-config-")
+    env["XDG_CONFIG_HOME"] = settings_home.name
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="forgeusb-owned-gui-smoke-") as directory:
         target = Path(directory) / "never-created-output.img"

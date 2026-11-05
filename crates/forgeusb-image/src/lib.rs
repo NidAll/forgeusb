@@ -2,13 +2,16 @@
 use anyhow::{Context, Result, bail, ensure};
 use forgeusb_core::Cancellation;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
+
+pub mod checksums;
+pub mod sparse;
+pub use sparse::{ByteRange, Coverage};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileStamp {
@@ -58,6 +61,22 @@ pub struct ImageInfo {
     pub windows: bool,
     pub warnings: Vec<String>,
     pub stamp: FileStamp,
+    /// `full` for ordinary images; `data_ranges` only for ForgeUSB-prepared images.
+    #[serde(default)]
+    pub coverage: Coverage,
+    /// Write set for `data_ranges` coverage; empty for `full`.
+    #[serde(default)]
+    pub ranges: Vec<ByteRange>,
+}
+impl ImageInfo {
+    /// Byte ranges a writer must copy and a verifier must compare.
+    pub fn effective_ranges(&self) -> Vec<ByteRange> {
+        sparse::effective(self.coverage, &self.ranges, self.size)
+    }
+    /// Bytes that will actually be transferred.
+    pub fn transfer_bytes(&self) -> u64 {
+        sparse::total(&self.effective_ranges())
+    }
 }
 pub fn open_source(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
@@ -78,15 +97,40 @@ pub fn inspect_cancel(path: &Path, cancel: &Cancellation) -> Result<ImageInfo> {
 /// Inspect an already opened regular file. The helper retains this descriptor
 /// from an unprivileged open through writing; path replacement cannot redirect reads.
 pub fn inspect_opened(path: &Path, f: &mut File, cancel: &Cancellation) -> Result<ImageInfo> {
+    inspect_opened_with(path, f, cancel, Coverage::Full)
+}
+pub fn inspect_with(path: &Path, cancel: &Cancellation, coverage: Coverage) -> Result<ImageInfo> {
+    let mut f = open_source(path)?;
+    inspect_opened_with(path, &mut f, cancel, coverage)
+}
+/// Inspect with an explicit coverage. `DataRanges` must be requested only for
+/// images ForgeUSB prepared itself; holes are then left unwritten on the target.
+pub fn inspect_opened_with(
+    path: &Path,
+    f: &mut File,
+    cancel: &Cancellation,
+    coverage: Coverage,
+) -> Result<ImageInfo> {
     let stamp = FileStamp::of(f)?;
     f.seek(SeekFrom::Start(0))?;
-    ensure!(stamp.size >= 512, "image is smaller than one disk sector");
     let mut head = [0u8; 512];
-    f.read_exact(&mut head)?;
+    let mut filled = 0;
+    while filled < head.len() {
+        let n = f.read(&mut head[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
     let compressed = head.starts_with(&[0x1f, 0x8b])
         || head.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0])
         || head.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
-        || head.starts_with(b"BZh");
+        || head.starts_with(b"BZh")
+        || head.starts_with(b"PK\x03\x04");
+    ensure!(
+        compressed || stamp.size >= 512,
+        "image is smaller than one disk sector"
+    );
     let mut iso = false;
     let mut udf = false;
     let mut torito = false;
@@ -173,28 +217,19 @@ pub fn inspect_opened(path: &Path, f: &mut File, cancel: &Cancellation) -> Resul
     } else {
         ImageKind::Unknown
     };
-    f.seek(SeekFrom::Start(0))?;
-    let mut hash = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    let mut total = 0u64;
-    loop {
-        cancel.check()?;
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        total = total.checked_add(n as u64).context("size overflow")?;
-        ensure!(total <= stamp.size, "source grew while hashing");
-        hash.update(&buf[..n]);
-    }
+    let ranges = match coverage {
+        Coverage::Full => Vec::new(),
+        Coverage::DataRanges => sparse::write_ranges(f, stamp.size)?,
+    };
+    let sha256 = sparse::digest(f, coverage, &ranges, stamp.size, cancel)?;
     ensure!(
-        total == stamp.size && stamp == FileStamp::of(f)?,
+        stamp == FileStamp::of(f)?,
         "source changed during inspection"
     );
     Ok(ImageInfo {
         path: path.to_path_buf(),
         size: stamp.size,
-        sha256: format!("{:x}", hash.finalize()),
+        sha256,
         kind,
         bootable_disk: disk && !compressed,
         iso9660: iso,
@@ -203,6 +238,8 @@ pub fn inspect_opened(path: &Path, f: &mut File, cancel: &Cancellation) -> Resul
         windows,
         warnings,
         stamp,
+        coverage,
+        ranges,
     })
 }
 fn le32(s: &[u8]) -> u32 {

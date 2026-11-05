@@ -63,13 +63,14 @@ publisher signature or current release authenticity check.
    [UEFI:NTFS chain](https://github.com/pbatard/uefi-ntfs) is a separate mechanism.
 4. Physical USB writes, installed-helper authorization/exclusivity, fault/unplug
    recovery and problematic physical firmware require exact-device authorization.
-   Raw GPT remains source-sized; no backup-GPT relocation or kernel partition-node
-   refresh is performed. Safely remove/reinsert the device after completion.
+   Raw GPT remains source-sized; no backup-GPT relocation is performed. The kernel
+   is asked to re-read the partition table, and the desktop can power the drive off.
 5. Linux uses the vendor's disk/ISOHybrid layout. The official
    [CachyOS preparation guide](https://wiki.cachyos.org/installation/installation_prepare/)
    documents raw flashing. No CachyOS image was downloaded, and no universal
    firmware compatibility is claimed. Generic optical-Linux conversion,
-   persistence, compressed streaming and UDisks removal remain future adapters.
+   persistence and ESD conversion remain future adapters; compressed images are
+   expanded before review and UDisks unmount/power-off run in the user session.
 6. GTK chooser/screen-reader acceptance, broad hardware QA and clean distribution
    build environments remain open. Debian/RPM recipes need a populated Cargo
    cache or vendored sources and have not been verified as native packages.

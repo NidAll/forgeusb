@@ -1,12 +1,18 @@
 //! Unprivileged, verified construction of new regular-file installation media.
 //! No block devices, mounts, loop devices, elevation, or implicit raw writes.
+pub mod decompress;
 mod iso;
 mod process;
 mod snapshot;
 
+/// Largest image ForgeUSB will build: the FAT32 limit at 512-byte sectors.
+/// Images are sparse, so the size reflects the target device, not disk usage.
+pub const MAX_IMAGE_BYTES: u64 = (u32::MAX as u64 + 1) * 512;
+
 use anyhow::{Context, Result, ensure};
 use forgeusb_core::{Cancellation, Progress, Stage, progress};
 use forgeusb_filesystem::FAT32_MAX_FILE_BYTES;
+use forgeusb_image::{Coverage, sparse};
 use forgeusb_partition::{
     Layout, Scheme, plan_uefi_fat32, verify_partition_table, write_partition_table,
 };
@@ -25,8 +31,13 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct BuildOptions {
     pub scheme: Scheme,
+    /// Exact image size; pass the target device capacity to fill the drive.
     pub capacity_bytes: Option<u64>,
     pub timeout: Duration,
+    /// FAT32 volume label (1–11 of A–Z, 0–9, space, underscore).
+    pub label: String,
+    /// Windows Setup answer-file options; nothing is added when all are off.
+    pub customization: forgeusb_windows::unattend::Customization,
 }
 impl Default for BuildOptions {
     fn default() -> Self {
@@ -34,6 +45,8 @@ impl Default for BuildOptions {
             scheme: Scheme::Mbr,
             capacity_bytes: None,
             timeout: Duration::from_secs(3600),
+            label: "FORGEUSB".into(),
+            customization: Default::default(),
         }
     }
 }
@@ -49,6 +62,9 @@ pub struct BuildReport {
     pub wim_split: bool,
     pub source_kind: String,
     pub source_sha256: Option<String>,
+    /// `data_ranges`: plan this image with prepared-image coverage.
+    pub digest_coverage: Coverage,
+    pub customizations: Vec<String>,
     pub coverage: String,
 }
 struct DigestWriter(Sha256);
@@ -129,8 +145,8 @@ fn choose_capacity(bytes: u64, files: usize, requested: Option<u64>) -> Result<u
         minimum.div_ceil(1024 * 1024)
     );
     ensure!(
-        capacity <= snapshot::MAX_BYTES && capacity.is_multiple_of(512),
-        "image capacity must be sector-aligned and at most 128 GiB"
+        capacity <= MAX_IMAGE_BYTES && capacity.is_multiple_of(512),
+        "image capacity must be sector-aligned and at most 2 TiB"
     );
     Ok(capacity)
 }
@@ -147,6 +163,58 @@ fn format_fat(
     args.push(layout.partitions[0].start_lba.to_string().into());
     args.push(volume.as_os_str().to_owned());
     run_args(&mkfs, args, cwd, cancel, end)
+}
+/// Volume-label rules shared by Windows preparation and formatting.
+pub fn validate_label(filesystem: forgeusb_filesystem::Filesystem, label: &str) -> Result<()> {
+    use forgeusb_filesystem::Filesystem;
+    ensure!(
+        !label.is_empty()
+            && !label
+                .chars()
+                .any(|c| c.is_control() || "\\/:*?\"<>|".contains(c)),
+        "volume label contains forbidden characters"
+    );
+    match filesystem {
+        Filesystem::Fat32 => ensure!(
+            label.len() <= 11
+                && label.bytes().all(|b| b.is_ascii_uppercase()
+                    || b.is_ascii_digit()
+                    || b == b' '
+                    || b == b'_'),
+            "FAT32 label must contain 1 to 11 uppercase ASCII letters, digits, spaces or underscores"
+        ),
+        Filesystem::Exfat => ensure!(
+            label.encode_utf16().count() <= 11,
+            "exFAT label exceeds 11 UTF-16 code units"
+        ),
+        Filesystem::Ntfs => ensure!(
+            label.encode_utf16().count() <= 32,
+            "NTFS label exceeds 32 UTF-16 code units"
+        ),
+        Filesystem::Ext4 => ensure!(label.len() <= 16, "ext4 label exceeds 16 bytes"),
+    }
+    Ok(())
+}
+/// Turn free text into a valid FAT32 label (uppercase, allowed characters, 11 max).
+pub fn fat_label(text: &str) -> String {
+    let label: String = text
+        .chars()
+        .map(|c| c.to_ascii_uppercase())
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == ' ' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(11)
+        .collect();
+    let label = label.trim_end().to_owned();
+    if label.is_empty() {
+        "FORGEUSB".into()
+    } else {
+        label
+    }
 }
 fn verify_fat_header(volume: &mut File, layout: &Layout) -> Result<()> {
     volume.seek(SeekFrom::Start(0))?;
@@ -257,57 +325,64 @@ fn assemble(
     staged.as_file_mut().set_len(layout.capacity_bytes)?;
     write_partition_table(staged.as_file_mut(), layout)?;
     let target = staged.as_file_mut();
-    target.seek(SeekFrom::Start(
-        layout.partitions[0].start_lba * layout.sector_bytes,
-    ))?;
-    volume.seek(SeekFrom::Start(0))?;
-    let total = volume.metadata()?.len();
+    let offset = layout.partitions[0].start_lba * layout.sector_bytes;
+    let volume_len = volume.metadata()?.len();
+    ensure!(
+        volume_len == layout.partitions[0].sectors * layout.sector_bytes,
+        "partition payload size mismatch"
+    );
+    // Copy only the partition's data ranges. Free clusters stay sparse holes,
+    // so a device-sized image costs only its payload in disk space and time.
+    let ranges = sparse::write_ranges(volume, volume_len)?;
+    let total = sparse::total(&ranges);
     let mut copied = 0u64;
     let mut buf = vec![0u8; 1024 * 1024];
     let mut source_hash = Sha256::new();
-    loop {
-        cancel.check()?;
-        ensure!(Instant::now() < end, "media assembly timed out");
-        let n = volume.read(&mut buf)?;
-        if n == 0 {
-            break;
+    for range in &ranges {
+        volume.seek(SeekFrom::Start(range.start))?;
+        target.seek(SeekFrom::Start(offset + range.start))?;
+        let mut left = range.len();
+        while left > 0 {
+            cancel.check()?;
+            ensure!(Instant::now() < end, "media assembly timed out");
+            let n = left.min(buf.len() as u64) as usize;
+            volume.read_exact(&mut buf[..n])?;
+            target.write_all(&buf[..n])?;
+            source_hash.update(&buf[..n]);
+            copied += n as u64;
+            left -= n as u64;
+            emit_stage(
+                emit,
+                Stage::Writing,
+                copied,
+                total,
+                "Assembling verified partition into disk image",
+            );
         }
-        target.write_all(&buf[..n])?;
-        source_hash.update(&buf[..n]);
-        copied += n as u64;
-        emit_stage(
-            emit,
-            Stage::Writing,
-            copied,
-            total,
-            "Assembling verified partition into disk image",
-        );
     }
-    ensure!(
-        copied == layout.partitions[0].sectors * layout.sector_bytes,
-        "partition payload size mismatch"
-    );
     emit_stage(emit, Stage::Flushing, copied, total, "Flushing disk image");
     target.sync_all()?;
     verify_partition_table(target, layout)?;
-    target.seek(SeekFrom::Start(
-        layout.partitions[0].start_lba * layout.sector_bytes,
-    ))?;
     let mut read_hash = Sha256::new();
-    let mut remaining = total;
-    while remaining > 0 {
-        cancel.check()?;
-        ensure!(Instant::now() < end, "partition read-back timed out");
-        let take = (remaining as usize).min(buf.len());
-        target.read_exact(&mut buf[..take])?;
-        read_hash.update(&buf[..take]);
-        remaining -= take as u64;
+    for range in &ranges {
+        target.seek(SeekFrom::Start(offset + range.start))?;
+        let mut left = range.len();
+        while left > 0 {
+            cancel.check()?;
+            ensure!(Instant::now() < end, "partition read-back timed out");
+            let take = left.min(buf.len() as u64) as usize;
+            target.read_exact(&mut buf[..take])?;
+            read_hash.update(&buf[..take]);
+            left -= take as u64;
+        }
     }
     ensure!(
         source_hash.finalize() == read_hash.finalize(),
         "assembled partition read-back hash mismatch"
     );
-    let sha256 = snapshot::hash(target, cancel, end)?;
+    let size = target.metadata()?.len();
+    let image_ranges = sparse::write_ranges(target, size)?;
+    let sha256 = sparse::digest(target, Coverage::DataRanges, &image_ranges, size, cancel)?;
     cancel.check()?;
     ensure!(
         Instant::now() < end,
@@ -347,6 +422,10 @@ pub fn build_windows_image(
         fs::symlink_metadata(output).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
         "output already exists or is inaccessible"
     );
+    validate_label(forgeusb_filesystem::Filesystem::Fat32, &options.label)?;
+    if let Some(name) = &options.customization.local_account {
+        forgeusb_windows::unattend::validate_account(name)?;
+    }
     // Dependency checks happen before copying large caller input.
     for name in ["mkfs.fat", "mcopy", "mmd", "fsck.fat", "wimlib-imagex"] {
         process::tool(name)?;
@@ -444,6 +523,25 @@ pub fn build_windows_image(
         run_args(&wimlib, args, &work_path, cancel, end)
             .context("Windows WIM resource verification failed")?;
     }
+    let customizations = options.customization.summary();
+    if let Some(xml) =
+        forgeusb_windows::unattend::render(&options.customization, &report.efi_architectures)?
+    {
+        ensure!(
+            !entries.iter().any(|e| e
+                .relative
+                .to_string_lossy()
+                .eq_ignore_ascii_case("autounattend.xml")),
+            "this installer already contains autounattend.xml; turn off the Windows setup options to keep it"
+        );
+        let path = tree.join("autounattend.xml");
+        fs::write(&path, xml.as_bytes())?;
+        entries.push(Entry {
+            relative: "autounattend.xml".into(),
+            bytes: xml.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(xml.as_bytes())),
+        });
+    }
     let mut wim_split = false;
     for path in &report.oversized_files {
         ensure!(
@@ -513,7 +611,14 @@ pub fn build_windows_image(
         bytes,
         "Formatting private FAT32 partition",
     );
-    format_fat(&volume_path, &layout, "FORGEUSB", cancel, end, &work_path)?;
+    format_fat(
+        &volume_path,
+        &layout,
+        &options.label,
+        cancel,
+        end,
+        &work_path,
+    )?;
     let mmd = process::tool("mmd")?;
     let mcopy = process::tool("mcopy")?;
     for dir in dirs(&entries) {
@@ -554,6 +659,9 @@ pub fn build_windows_image(
         end,
         &mut emit,
     )?;
+    // Every file is now verified inside the FAT32 volume; release the
+    // snapshot before assembly so peak disk use stays near twice the payload.
+    fs::remove_dir_all(&tree)?;
     let (output, sha256) = assemble(
         &mut volume,
         output,
@@ -570,7 +678,7 @@ pub fn build_windows_image(
         capacity,
         "Verified Windows UEFI media image ready",
     );
-    Ok(BuildReport{output,image_bytes:capacity,sha256,layout,files_verified:entries.len(),payload_bytes:bytes,efi_architectures:report.efi_architectures,wim_split,source_kind,source_sha256,coverage:"Verified WIM resource data via wimlib, partition tables (including both GPT copies/CRCs), FAT32 filesystem consistency, every staged file SHA-256 read back from FAT32, and whole assembled partition SHA-256. Windows-shaped simulation does not validate genuine Windows 10/11 Setup, BIOS boot, physical USB firmware or Secure Boot/signature acceptance. Original EFI loaders are preserved; no unsigned NTFS driver is introduced.".into()})
+    Ok(BuildReport{output,image_bytes:capacity,sha256,layout,files_verified:entries.len(),payload_bytes:bytes,efi_architectures:report.efi_architectures,wim_split,source_kind,source_sha256,digest_coverage:Coverage::DataRanges,customizations,coverage:"Verified WIM resource data via wimlib, partition tables (including both GPT copies/CRCs), FAT32 filesystem consistency, every staged file SHA-256 read back from FAT32, and whole assembled partition SHA-256. Windows-shaped simulation does not validate genuine Windows 10/11 Setup, BIOS boot, physical USB firmware or Secure Boot/signature acceptance. Original EFI loaders are preserved; no unsigned NTFS driver is introduced.".into()})
 }
 
 #[cfg(test)]
@@ -706,16 +814,47 @@ mod tests {
             assert_eq!(report.efi_architectures, ["x86_64"]);
             let mut f = File::open(&out).unwrap();
             verify_partition_table(&mut f, &report.layout).unwrap();
-            assert_eq!(
-                report.sha256,
-                snapshot::hash(
-                    &mut f,
-                    &Cancellation::default(),
-                    Instant::now() + Duration::from_secs(60)
-                )
-                .unwrap()
-            );
+            let info =
+                forgeusb_image::inspect_with(&out, &Cancellation::default(), Coverage::DataRanges)
+                    .unwrap();
+            assert_eq!(report.sha256, info.sha256);
+            assert!(info.bootable_disk);
         }
+        // A device-sized image stays sparse, carries the answer file and label.
+        let big = d.path().join("device-sized.img");
+        let capacity = 8 * 1024 * 1024 * 1024;
+        let report = build_windows_image(
+            &input,
+            &big,
+            &BuildOptions {
+                scheme: Scheme::Gpt,
+                capacity_bytes: Some(capacity),
+                label: "WIN11_TEST".into(),
+                customization: forgeusb_windows::unattend::Customization {
+                    bypass_requirements: true,
+                    local_account: Some("tester".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &Cancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(report.files_verified, 6);
+        assert_eq!(report.customizations.len(), 2);
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&big).unwrap();
+        assert_eq!(meta.len(), capacity);
+        assert!(
+            meta.blocks() * 512 < 256 * 1024 * 1024,
+            "device-sized image must not allocate its free space"
+        );
+        let info =
+            forgeusb_image::inspect_with(&big, &Cancellation::default(), Coverage::DataRanges)
+                .unwrap();
+        assert_eq!(info.sha256, report.sha256);
+        assert!(info.transfer_bytes() < 256 * 1024 * 1024);
         if let Ok(xorriso) = process::tool("xorriso") {
             let iso = d.path().join("windows-shaped.iso");
             let args = vec![
@@ -859,6 +998,8 @@ pub struct FormatReport {
     pub layout: Layout,
     pub filesystem: forgeusb_filesystem::Filesystem,
     pub label: String,
+    /// `data_ranges`: plan this image with prepared-image coverage.
+    pub digest_coverage: Coverage,
     pub coverage: String,
 }
 fn verify_ntfs_header(volume: &mut File, layout: &Layout) -> Result<()> {
@@ -911,45 +1052,28 @@ pub fn format_image(
         "image formatting must run as an ordinary user"
     );
     ensure!(
-        matches!(options.filesystem, Filesystem::Fat32 | Filesystem::Ntfs),
-        "image formatting supports FAT32 and NTFS"
-    );
-    ensure!(
-        options.capacity_bytes <= snapshot::MAX_BYTES,
-        "image exceeds 128 GiB safety budget"
+        options.capacity_bytes <= MAX_IMAGE_BYTES,
+        "image exceeds the 2 TiB limit"
     );
     let end = deadline(&BuildOptions {
         scheme: options.scheme,
         capacity_bytes: Some(options.capacity_bytes),
         timeout: options.timeout,
+        ..Default::default()
     })?;
     let label = &options.label;
-    ensure!(
-        !label.is_empty()
-            && !label
-                .chars()
-                .any(|c| c.is_control() || "\\/:*?\"<>|".contains(c)),
-        "volume label contains forbidden characters"
-    );
-    if options.filesystem == Filesystem::Fat32 {
-        ensure!(
-            label.len() <= 11
-                && label.bytes().all(|b| b.is_ascii_uppercase()
-                    || b.is_ascii_digit()
-                    || b == b' '
-                    || b == b'_'),
-            "FAT32 label must contain 1 to 11 uppercase ASCII letters, digits, spaces or underscores"
-        );
-    } else {
-        ensure!(
-            label.encode_utf16().count() <= 32,
-            "NTFS label exceeds 32 UTF-16 code units"
-        );
-    }
-    let layout = if options.filesystem == Filesystem::Fat32 {
-        plan_uefi_fat32(options.capacity_bytes, 512, options.scheme)?
-    } else {
-        forgeusb_partition::plan_ntfs(options.capacity_bytes, 512, options.scheme)?
+    validate_label(options.filesystem, label)?;
+    let layout = match options.filesystem {
+        Filesystem::Fat32 => plan_uefi_fat32(options.capacity_bytes, 512, options.scheme)?,
+        Filesystem::Ntfs => {
+            forgeusb_partition::plan_data(options.capacity_bytes, 512, options.scheme, "ntfs")?
+        }
+        Filesystem::Exfat => {
+            forgeusb_partition::plan_data(options.capacity_bytes, 512, options.scheme, "exfat")?
+        }
+        Filesystem::Ext4 => {
+            forgeusb_partition::plan_data(options.capacity_bytes, 512, options.scheme, "ext4")?
+        }
     };
     let parent = output
         .parent()
@@ -987,6 +1111,43 @@ pub fn format_image(
             end,
             &mut emit,
         )?;
+    } else if options.filesystem == Filesystem::Exfat {
+        let mkfs = process::tool("mkfs.exfat")?;
+        let mut args = process::args(&["-L", label]);
+        args.push(path.as_os_str().to_owned());
+        run_args(&mkfs, args, &work_path, cancel, end)?;
+        volume.seek(SeekFrom::Start(0))?;
+        let mut header = [0u8; 512];
+        volume.read_exact(&mut header)?;
+        ensure!(
+            &header[3..11] == b"EXFAT   " && header[510..] == [0x55, 0xaa],
+            "formatter did not produce an exFAT boot sector"
+        );
+        let check = process::tool("fsck.exfat")?;
+        let mut args = process::args(&["-n"]);
+        args.push(path.as_os_str().to_owned());
+        run_args(&check, args, &work_path, cancel, end)?;
+    } else if options.filesystem == Filesystem::Ext4 {
+        let mkfs = process::tool("mkfs.ext4")?;
+        // The desktop user owns the root directory so the drive is writable
+        // without root; no blocks are reserved for root on removable media.
+        let owner = format!("root_owner={}:{}", unsafe { libc::getuid() }, unsafe {
+            libc::getgid()
+        });
+        let mut args = process::args(&["-F", "-q", "-m", "0", "-L", label, "-E", &owner]);
+        args.push(path.as_os_str().to_owned());
+        run_args(&mkfs, args, &work_path, cancel, end)?;
+        volume.seek(SeekFrom::Start(1024 + 56))?;
+        let mut magic = [0u8; 2];
+        volume.read_exact(&mut magic)?;
+        ensure!(
+            magic == [0x53, 0xef],
+            "formatter did not produce an ext4 superblock"
+        );
+        let check = process::tool("e2fsck")?;
+        let mut args = process::args(&["-n", "-f"]);
+        args.push(path.as_os_str().to_owned());
+        run_args(&check, args, &work_path, cancel, end)?;
     } else {
         let mkfs = process::tool("mkfs.ntfs").or_else(|_| process::tool("mkntfs"))?;
         // -F is needed by ntfs-3g for an ordinary file. The target is a new
@@ -1020,5 +1181,5 @@ pub fn format_image(
         options.capacity_bytes,
         "Verified formatted disk image ready",
     );
-    Ok(FormatReport{output,image_bytes:options.capacity_bytes,sha256,layout,filesystem:options.filesystem,label:label.clone(),coverage:"New ordinary-file image only. Partition metadata, filesystem boot geometry, filesystem diagnostic check and assembled partition SHA-256 verified. Blank FAT32/NTFS format does not install boot loaders, confer Secure Boot trust, or prove firmware/Windows compatibility. ntfsfix is a limited consistency diagnostic, not Windows chkdsk.".into()})
+    Ok(FormatReport{output,image_bytes:options.capacity_bytes,sha256,layout,filesystem:options.filesystem,label:label.clone(),digest_coverage:Coverage::DataRanges,coverage:"New ordinary-file image only. Partition metadata, filesystem boot geometry, filesystem diagnostic check and assembled partition SHA-256 verified. Blank format does not install boot loaders, confer Secure Boot trust, or prove firmware/Windows compatibility. ntfsfix is a limited consistency diagnostic, not Windows chkdsk.".into()})
 }

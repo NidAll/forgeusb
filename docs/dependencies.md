@@ -4,7 +4,7 @@ ForgeUSB source is GPL-3.0-or-later. Rufus/WoeUSB source was studied to understa
 
 ## Direct Rust dependencies
 
-Actual selected versions belong to `Cargo.lock`; this table lists license families from upstream package metadata. Release builders must export the resolved Cargo metadata/license inventory for every distributed target, including transitive crates, before redistribution. The included inventory covers x86_64-unknown-linux-gnu and development dependencies: 223 packages, of which 210 are registry crates; no license field was missing at generation time. Do not infer complete compliance from this abbreviated table.
+Actual selected versions belong to `Cargo.lock`; this table lists license families from upstream package metadata. Release builders must export the resolved Cargo metadata/license inventory for every distributed target, including transitive crates, before redistribution. The included inventory covers x86_64-unknown-linux-gnu and development dependencies: 249 packages, of which 236 are registry crates; no license field was missing at generation time. Do not infer complete compliance from this abbreviated table.
 
 | Crate | Purpose | Upstream license expression |
 |---|---|---|
@@ -14,6 +14,14 @@ Actual selected versions belong to `Cargo.lock`; this table lists license famili
 | libc | Linux kernel/libc descriptor interface | MIT OR Apache-2.0 |
 | iced | Native Rust GUI, tiny-skia backend | MIT |
 | tempfile | Private construction/cache images, atomic output publication and disposable fixtures | MIT OR Apache-2.0 |
+| md-5 / sha1 | MD5 and SHA-1 for comparing publishers' checksums (never used for safety decisions) | MIT OR Apache-2.0 |
+| flate2 | gzip decompression of staged images (pure-Rust miniz_oxide backend) | MIT OR Apache-2.0 |
+| lzma-rust2 | xz decompression of staged images | Apache-2.0 |
+| ruzstd | zstd decompression of staged images | MIT |
+| bzip2 | bzip2 decompression of staged images (pure-Rust libbz2-rs-sys) | MIT OR Apache-2.0; libbz2-rs-sys is bzip2-1.0.6 |
+| zip | Single-entry .zip image extraction (deflate only) | MIT |
+
+Iced's `lazy` feature (for size-aware widgets) adds ouroboros/aliasable, MIT OR Apache-2.0 and MIT. All decompressors are pure Rust and run unprivileged in the desktop user's session; none runs in the root helper.
 
 If additional dependencies are present in the workspace manifest, use the generated `docs/dependency-licenses.json` as the resolved source of truth. Iced pulls windowing, font, renderer, executor and platform crates; their licenses remain independent. No crates are selected from a mutable Git branch. `Cargo.lock` and `--locked` are mandatory for release builds.
 
@@ -29,8 +37,10 @@ If additional dependencies are present in the workspace manifest, use the genera
 | 7z / 7zz | Bounded ISO9660/UDF listing and stdout extraction, unprivileged | OS-provided 7-Zip; no executable bundled |
 | dosfstools / mtools | Private FAT32 formatting, consistency checking, copy and file read-back | OS-provided GPL tools; no executable linked/bundled |
 | ntfs-3g tools | Private NTFS formatting and limited ntfsfix diagnostics | OS-provided GPL tools; no NTFS driver linked or installed on the media |
+| exfatprogs | Private exFAT formatting (`mkfs.exfat`) and read-only check (`fsck.exfat -n`) | OS-provided GPL-2.0 tools; no executable bundled |
+| e2fsprogs | Private ext4 formatting (`mkfs.ext4`) and read-only check (`e2fsck -n`) | OS-provided GPL-2.0 tools; no executable bundled |
 | sfdisk | Independent fixture/partition validation | Runtime partition tables are constructed and verified by Rust; no physical sfdisk invocation |
-| UDisks2 | Potential unmount/safe removal integration | Presence is not implementation; optional future D-Bus integration |
+| UDisks2 (`udisksctl`) | Unmount before planning and power off after a verified write, run as the desktop user under UDisks' own Polkit rules; never from the root helper | OS-provided LGPL/GPL service; fixed root-owned `/usr/bin/udisksctl`, no library linked |
 | GRUB/Syslinux | Potential per-strategy bootloader installation | GPL obligations, exact version/modules and firmware test matrix required |
 | UEFI:NTFS plus filesystem driver | Investigated only; not included | UEFI:NTFS GPL-2.0-or-later; driver license and signed-artifact identity checked separately |
 | QEMU/OVMF | Optional disposable-image virtual boot tests | OS packages, no firmware binaries bundled; keep fresh per-test NVRAM |

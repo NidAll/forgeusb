@@ -1,8 +1,8 @@
 # ForgeUSB
 
-A native Linux boot-media writer in Rust, with an Iced desktop app and a shared CLI engine. It writes raw disk/ISOHybrid images, prepares Windows UEFI installation media from ISO9660/UDF images or extracted trees, and creates partitioned FAT32/NTFS images. Writes require an exact reviewed confirmation and full source-byte read-back. This is an engineering build with [explicit release gates](docs/production-development.md), rather than a claim of complete Rufus parity.
+A native Linux boot-media writer in Rust, with an Iced desktop app and a shared CLI engine. It writes raw and compressed disk/ISOHybrid images, prepares customizable Windows UEFI installation media from ISO9660/UDF images or extracted trees, and formats drives as FAT32, exFAT, NTFS or ext4. Writes require an exact reviewed confirmation and full source-byte read-back. This is an engineering build with [explicit release gates](docs/production-development.md), rather than a claim of complete Rufus parity.
 
-**Physical writes erase the selected USB. No physical disk was overwritten during development.** Never run the GUI as root. Physical writes require a separately installed Polkit helper, an eligible unmounted USB with a stable identity, a reviewed plan, and exact typed confirmation. No device is automatically selected. Desktop admission is preliminary; the root helper must repeat authoritative system-wide checks before any physical write. The device layer rejects host/system storage, mounted partitions, active swap, device-mapper/RAID holders, uncertain backing topology and non-512-byte logical sectors.
+**Physical writes erase the selected USB. No physical disk was overwritten during development.** Never run the GUI as root. Physical writes require a separately installed Polkit helper, an eligible unmounted USB with a stable identity, a reviewed plan, and typed confirmation of the drive. No device is automatically selected. Desktop admission is preliminary; the root helper must repeat authoritative system-wide checks before any physical write. The device layer rejects host/system storage, mounted partitions, active swap, device-mapper/RAID holders, uncertain backing topology and non-512-byte logical sectors.
 
 ## Screenshots
 
@@ -42,7 +42,9 @@ Planning is read-only and produces the exact source SHA-256, identity/topology s
 ./target/release/forgeusb verify /absolute/path/linux.iso --device /dev/sdX
 ```
 
-The write command prompts interactively. Noninteractive use requires BOTH the reviewed plan file and `--confirm 'EXACT confirmation FROM plan.json'`; there is no blanket `--yes` or system-disk override. A changed source/device invalidates the plan. Physical write privilege is obtained through fixed `/usr/bin/pkexec /usr/lib/forgeusb/forgeusb-helper write --plan-json --protocol-v2`. The helper revalidates the plan independently and only opens user-readable, user-owned source files with that user's filesystem credentials. See [device safety](docs/device-safety.md) and [threat model](docs/threat-model.md).
+`verify` on a physical drive asks for Polkit authorization and runs `forgeusb-helper verify`, which revalidates the drive like a write but opens it read-only and only compares it with your image.
+
+The write command prompts interactively. Noninteractive use requires BOTH the reviewed plan file and `--confirm 'EXACT confirmation FROM plan.json'`; there is no blanket `--yes` or system-disk override. A changed source/device invalidates the plan. Physical write privilege is obtained through fixed `/usr/bin/pkexec /usr/lib/forgeusb/forgeusb-helper write --plan-json --protocol-v3`. The helper revalidates the plan independently and only opens user-readable, user-owned source files with that user's filesystem credentials. See [device safety](docs/device-safety.md) and [threat model](docs/threat-model.md).
 
 To exercise the complete write/verify path without USB hardware, choose a **new** output file:
 
@@ -52,7 +54,7 @@ To exercise the complete write/verify path without USB hardware, choose a **new*
 ./target/release/forgeusb verify /absolute/path/disk.img --device /absolute/path/NEW-test-copy.img --test-file
 ```
 
-Disposable-file mode never overwrites an existing file. The compact Rufus-style GUI exposes the same mode under advanced drive properties. SELECT or Ctrl+O opens a native file chooser; START or Ctrl+P opens the read-only review. Writing requires exact typed confirmation in that dialog. Esc dismisses or cancels. See [GUI details](docs/gui.md).
+Disposable-file mode never overwrites an existing file. The compact Rufus-style GUI exposes the same mode under advanced drive properties. SELECT or Ctrl+O opens a native file chooser; START or Ctrl+P opens the read-only review. Writing requires typing the drive's short name (or CREATE for a file) in that dialog. Esc dismisses or cancels. See [GUI details](docs/gui.md).
 
 `--json` emits a JSON document for read-only queries and newline-delimited progress/completion events for write/verify. Preparation/formatting commands emit one final JSON report on stdout and progress
 on stderr. Errors are JSON on stderr. Exit status: 0 success; 1 operation/safety/dependency failure; 2 invalid CLI syntax. Ctrl+C requests cancellation and currently returns operation failure (1). A partial write is not rolled back. Cancellation takes effect between I/O chunks and cannot interrupt a kernel I/O call already blocked.
@@ -63,24 +65,31 @@ on stderr. Errors are JSON on stderr. Exit status: 0 success; 1 operation/safety
 - Bounded ISO9660/UDF recognition, El Torito validation-header inspection, MBR/GPT primary metadata checks, SHA-256, disk/ISOHybrid strategy selection.
 - Streaming raw writes with a 1 MiB buffer, exclusive kernel device claim, flush and complete source-length byte comparison.
 - Windows UEFI media preparation: bounded ISO9660/UDF extraction, descriptor-based tree snapshots, WIM verification/splitting, MBR/GPT FAT32 construction and per-file SHA-256 read-back. The resulting image goes through the same reviewed USB write path. The GUI exposes both Windows modes.
-- New-image FAT32 and NTFS formatting with MBR/GPT partition tables, filesystem diagnostics, partition read-back and atomic publication. Filesystem tools never receive a physical device.
+- Windows setup customization through a generated `autounattend.xml`: TPM/Secure Boot/RAM requirement bypass, no Microsoft account, a named local account, host regional settings, privacy questions and BitLocker auto-encryption.
+- Device-sized FAT32, exFAT, NTFS and ext4 formatting with MBR/GPT partition tables, filesystem diagnostics, partition read-back and atomic publication. Images are sparse: only data ranges plus the first and last 2 MiB are written and verified. Filesystem tools never receive a physical device.
+- Unprivileged expansion of gzip, xz, zstd, bzip2 and single-file zip images before review; MD5/SHA-1/SHA-256/SHA-512 checksums with automatic published-checksum lookup.
+- Unmount before planning and safe power-off after verification through UDisks2 in the desktop session (never in the root helper), and partition-table re-read after writing.
 - Stronger standalone GPT validation and bounded removal/read-back of recognized stale backup GPT metadata beyond the source range on a larger physical target.
 
-Windows preparation has been validated with synthetic installer-shaped trees, real small WIM containers and an original EFI test program under OVMF. **Genuine Windows Setup has not been tested.** Windows BIOS/NTFS boot, UEFI:NTFS installation, generic Linux extraction, persistence, compressed writes and safe power-off remain unavailable. Unmount through your desktop before planning, and safely remove/reinsert after writing. Secure Boot depends on the source loader and firmware trust/revocation state. Read-back verifies storage bytes, not firmware compatibility or power-loss persistence. Most unused target space remains untouched; only recognized stale target-end GPT metadata is cleared separately. GPT is preserved at the source image's size, without relocation to a larger device's end. See the [compatibility matrix](docs/compatibility.md).
+Windows preparation has been validated with synthetic installer-shaped trees, real small WIM containers and an original EFI test program under OVMF. **Genuine Windows Setup has not been tested.** Windows BIOS/NTFS boot, UEFI:NTFS installation, generic Linux extraction, persistence, ESD conversion and 4K-sector targets remain unavailable; see the [Rufus gap report](docs/rufus-gap-report.md). Secure Boot depends on the source loader and firmware trust/revocation state. Read-back verifies storage bytes, not firmware compatibility or power-loss persistence. For raw images most unused target space remains untouched; only recognized stale target-end GPT metadata is cleared separately. GPT is preserved at the source image's size, without relocation to a larger device's end. See the [compatibility matrix](docs/compatibility.md).
 
 ## Windows UEFI media and formatting
 
-Preparation runs unprivileged and creates a new ordinary image file. Install the optional OS packages providing **7z/7zz, dosfstools, mtools and wimlib**; ForgeUSB does not install dependencies or download Windows/bootloader files. Allow disk space for the extracted snapshot, filesystem and final image. Scratch files are created beside the output, avoiding RAM-backed `/tmp` limits.
+Preparation runs unprivileged and creates a new ordinary image file. Install the optional OS packages providing **7z/7zz, dosfstools, mtools and wimlib** (plus **exfatprogs**/**e2fsprogs** for exFAT/ext4 and **udisks2** for unmount/eject); ForgeUSB does not install dependencies or download Windows/bootloader files. Allow disk space for the extracted snapshot, filesystem and final image. Scratch files are created beside the output, avoiding RAM-backed `/tmp` limits.
 
 ```sh
-forgeusb prepare-windows /path/windows.iso --output /path/NEW-windows.img --scheme mbr --json
-forgeusb plan /path/NEW-windows.img --device /dev/sdX --json > plan.json
-forgeusb write --plan plan.json
+forgeusb prepare-windows /path/windows.iso --output /path/NEW-windows.img --device /dev/sdX \
+  --scheme gpt --bypass-requirements --no-online-account --local-account alex --regional=host
+forgeusb plan /path/NEW-windows.img --device /dev/sdX --prepared --json > plan.json
+forgeusb write --plan plan.json --eject
 
-forgeusb format-image --output /path/NEW-ntfs.img --filesystem ntfs --scheme gpt --capacity-mib 4096
+forgeusb format-image --output /path/NEW-exfat.img --filesystem exfat --device /dev/sdX --label DATA
+forgeusb decompress /path/image.img.xz --output /path/NEW-image.img --device /dev/sdX
+forgeusb checksum /path/windows.iso
+forgeusb unmount /dev/sdX
 ```
 
-Both Windows partition schemes target **UEFI**; MBR does not install BIOS boot code. Oversized `install.wim` is split automatically; oversized solid ESD and other oversized files are refused. NTFS formatting creates a blank data filesystem and adds no bootloader. Choose **Windows installer** in the GUI's Image option; START first prepares a private image in the user cache, then opens the USB review. Closing/cancelling preparation cannot start a USB write. [Windows details and limits](docs/windows.md).
+Both Windows partition schemes target **UEFI**; MBR does not install BIOS boot code. `--device` sizes the image to that drive (read-only); `--prepared` tells plan/verify the image is ForgeUSB-made so only its data ranges are transferred. Oversized `install.wim` is split automatically; oversized solid ESD and other oversized files are refused. Formatting creates a blank data filesystem and adds no bootloader. In the GUI a Windows ISO selects **Windows installer** automatically; START first prepares a private image in the user cache, then opens the USB review. Closing/cancelling preparation cannot start a USB write. [Windows details and limits](docs/windows.md).
 
 ## Tests and research
 

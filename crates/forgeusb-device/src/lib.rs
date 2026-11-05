@@ -42,6 +42,9 @@ pub struct Partition {
     /// Observed mount filesystem or udev's cached ID_FS_TYPE; not a fresh probe.
     pub filesystem: Option<String>,
     pub mounts: Vec<String>,
+    /// udev's cached ID_FS_LABEL, for display only.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +60,10 @@ pub struct Device {
     pub partitions: Vec<Partition>,
     pub removable: bool,
     pub transport: String,
+    /// True when mounted filesystems are the only reason the device is refused,
+    /// so unmounting it through the desktop session would make it eligible.
+    #[serde(default)]
+    pub blocked_only_by_mounts: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,7 +96,7 @@ struct Mount {
     source: String,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Usage {
     mounts: BTreeMap<String, BTreeSet<String>>,
     filesystems: BTreeMap<String, String>,
@@ -132,9 +139,17 @@ fn discover_once() -> Result<Vec<Device>> {
         let names = component(&graph, &node.name);
         let (mut reasons, mounts) = admission(&graph, node, &usage);
         let path = Path::new("/dev").join(&node.name);
-        if let Err(error) = validate_device_node(&path, node.dev) {
+        let node_ok = validate_device_node(&path, node.dev);
+        if let Err(error) = &node_ok {
             reasons.insert(format!("device node unavailable or unsafe: {error:#}"));
         }
+        let unmounted = Usage {
+            mounts: BTreeMap::new(),
+            ..usage.clone()
+        };
+        let blocked_only_by_mounts = !reasons.is_empty()
+            && node_ok.is_ok()
+            && admission(&graph, node, &unmounted).0.is_empty();
         let topology = names
             .iter()
             .map(|name| {
@@ -166,6 +181,7 @@ fn discover_once() -> Result<Vec<Device>> {
                     .get(&n.name)
                     .map(|s| s.iter().cloned().collect())
                     .unwrap_or_default(),
+                label: udev_property(n.dev, "ID_FS_LABEL"),
             })
             .collect();
         devices.push(Device {
@@ -189,6 +205,7 @@ fn discover_once() -> Result<Vec<Device>> {
             partitions,
             removable: node.removable,
             transport: if node.usb { "usb" } else { "non-usb" }.into(),
+            blocked_only_by_mounts,
         });
     }
     devices.sort_by(|a, b| a.path.cmp(&b.path));
@@ -688,10 +705,16 @@ fn read_usage(graph: &Graph) -> Result<Usage> {
 }
 
 fn udev_filesystem(dev: (u32, u32)) -> Option<String> {
+    udev_property(dev, "ID_FS_TYPE")
+}
+
+fn udev_property(dev: (u32, u32), key: &str) -> Option<String> {
     let value = fs::read_to_string(format!("/run/udev/data/b{}:{}", dev.0, dev.1)).ok()?;
+    let prefix = format!("E:{key}=");
     value
         .lines()
-        .find_map(|line| line.strip_prefix("E:ID_FS_TYPE=").map(str::to_owned))
+        .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+        .filter(|v| !v.is_empty() && v.len() <= 256)
 }
 
 fn validate_path(path: &Path) -> Result<()> {
@@ -967,6 +990,7 @@ mod tests {
             partitions: Vec::new(),
             removable: true,
             transport: "usb".into(),
+            blocked_only_by_mounts: false,
         };
         let error = open_exclusive(&device, true).unwrap_err();
         assert!(error.to_string().contains("root helper"));

@@ -8,18 +8,17 @@ This is an engineering build. Raw-write capability, filesystem construction, gen
 | ISOHybrid | Structural recognition and raw strategy when accepted by inspector | Does not convert the ISO's firmware support; not every optical ISO is hybrid |
 | Plain Linux ISO9660 | Inspection; ISOHybrid raw writing when structurally recognized | Generic Linux extraction refused; preserve vendor USB image/ISOHybrid layout |
 | Windows ISO9660/UDF | Bounded safe extraction into private snapshot | Requires 7z/7zz and valid installer structure; data/resource integrity is checked |
-| Windows 10/11 installation ISO to USB | FAT32 UEFI image preparation, then reviewed shared writer | Synthetic tree/ISO/WIM/OVMF coverage only; genuine Windows Setup remains untested |
+| Windows 10/11 installation ISO to USB | Device-sized FAT32 UEFI image preparation, optional `autounattend.xml` customization, then reviewed shared writer | Synthetic tree/ISO/WIM/OVMF coverage and generated-XML unit tests only; genuine Windows Setup remains untested |
 | Windows extracted-tree inspection | Library API `inspect_extracted_tree` | Validates bounded metadata, FAT names, WIM magic and EFI PE machine; no complete WIM/signature/boot validation |
 | Oversized install.wim | Integrated unprivileged split-WIM/FAT32 preparation and standalone split | Validates complete SWM headers and wimlib resource integrity; small genuine WIM roundtrip, no large real-media download |
 | FAT32 EFI layout | Aligned MBR/GPT image construction with read-back | Original EFI fallback test application booted under OVMF in both schemes |
-| FAT32 / NTFS formatting | `format-image` builds new regular-file partitioned images; shared writer deploys them | Four MBR/GPT/filesystem combinations verified; NTFS format adds no bootloader |
-| exFAT / ext4 | File-limit policy; raw images preserve their embedded filesystems | Creation not implemented |
+| FAT32 / exFAT / NTFS / ext4 formatting | `format-image` and GUI *Format only* build device-sized sparse partitioned images (up to 2 TiB); only data ranges plus the first/last 2 MiB are written and verified | Eight MBR/GPT × filesystem combinations verified with independent sfdisk, header and fsck checks; formatting adds no bootloader |
 | UEFI:NTFS | Source strategy investigated, no binaries distributed/installed | Architecture, digest, signatures, revocation and boot tests required |
 | UEFI / BIOS | Raw preserves original loaders; Windows preparation targets UEFI | Original BIOS/UEFI fixtures and small Alpine tested; Windows BIOS loader installation unavailable |
 | GRUB / Syslinux | Preserved when embedded in raw image | No generic extraction/install executor |
 | Secure Boot | Raw bytes preserved; no signing or revocation service | Never guaranteed; depends on source and target firmware db/dbx/SBAT/trust state |
 | Linux persistence | Not implemented | Requires distro/version-specific adapter and reboot evidence |
-| Compressed images | Recognized/refused where detected | Decompress to a regular image with a trusted utility before inspection |
+| Compressed images | gzip, xz, zstd, bzip2 and single-entry zip expanded unprivileged into a sparse staged file, bounded by the target capacity, then reviewed and written in full | Trailing data and multi-entry archives are refused; the compressed file's SHA-256 is reported |
 | Destructive bad-block scan | Not exposed | Must never run as part of an ordinary write |
 | Windows To Go / DOS / FFU / VHD save | Not implemented | Separate future strategies |
 | Physical disks | Safety-gated engine; no test on real storage authorized | Physical destructive testing requires exact-device authorization |

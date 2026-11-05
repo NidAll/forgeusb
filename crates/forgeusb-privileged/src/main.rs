@@ -1,7 +1,8 @@
 //! Minimal Polkit entrypoint. Receives one bounded plan; engine independently revalidates it.
+//! `write` erases and writes the confirmed plan; `verify` only reads the drive back.
 use anyhow::{Context, Result, ensure};
 use forgeusb_core::Cancellation;
-use forgeusb_linux::{HelperEvent, TargetKind, WriteRequest};
+use forgeusb_linux::{HelperEvent, Plan, TargetKind, VerifyRequest, WriteRequest};
 use std::io::{self, BufRead, Read, Write};
 use std::os::unix::fs::MetadataExt;
 fn emit(event: HelperEvent) {
@@ -25,19 +26,30 @@ fn groups() -> Result<Vec<libc::gid_t>> {
     );
     Ok(groups)
 }
-fn validate_invocation(args: &[String]) -> Result<()> {
-    ensure!(
-        args == [
-            "write",
-            "--plan-json",
-            forgeusb_linux::HELPER_PROTOCOL_ARGUMENT
-        ],
-        "helper protocol mismatch: install the matching ForgeUSB app and helper; usage: forgeusb-helper write --plan-json --protocol-v2 (one JSON request on stdin)"
-    );
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Write,
+    Verify,
+}
+fn validate_invocation(args: &[String]) -> Result<Mode> {
+    let mode = match args {
+        [mode, plan, protocol]
+            if plan == "--plan-json" && protocol == forgeusb_linux::HELPER_PROTOCOL_ARGUMENT =>
+        {
+            match mode.as_str() {
+                "write" => Some(Mode::Write),
+                "verify" => Some(Mode::Verify),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    mode.context(
+        "helper protocol mismatch: install the matching ForgeUSB app and helper; usage: forgeusb-helper write|verify --plan-json --protocol-v3 (one JSON request on stdin)",
+    )
 }
 fn run() -> Result<()> {
-    validate_invocation(&std::env::args().skip(1).collect::<Vec<_>>())?;
+    let mode = validate_invocation(&std::env::args().skip(1).collect::<Vec<_>>())?;
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "helper requires Polkit authorization"
@@ -56,9 +68,15 @@ fn run() -> Result<()> {
         bytes.len() <= 4 * 1024 * 1024 && bytes.last() == Some(&b'\n'),
         "request must be a single bounded JSON line"
     );
-    let request: WriteRequest = serde_json::from_slice(&bytes)?;
+    let (plan, confirmation): (Plan, Option<String>) = match mode {
+        Mode::Write => {
+            let request: WriteRequest = serde_json::from_slice(&bytes)?;
+            (request.plan, Some(request.confirmation))
+        }
+        Mode::Verify => (serde_json::from_slice::<VerifyRequest>(&bytes)?.plan, None),
+    };
     ensure!(
-        matches!(request.plan.target_kind, TargetKind::Block(_)),
+        matches!(plan.target_kind, TargetKind::Block(_)),
         "helper only accepts physical block-device plans"
     );
     // Open with the requesting user's filesystem credentials: no privileged source reads.
@@ -90,7 +108,7 @@ fn run() -> Result<()> {
     let old = unsafe { libc::setfsuid(uid) };
     let switched = unsafe { libc::setfsuid(u32::MAX) } as u32 == uid;
     let source = if switched && gid_switched {
-        forgeusb_image::open_source(&request.plan.image.path)
+        forgeusb_image::open_source(&plan.image.path)
     } else {
         Err(anyhow::anyhow!(
             "could not assume requesting user's filesystem credentials"
@@ -117,7 +135,7 @@ fn run() -> Result<()> {
         "source must be owned by the requesting user; copy it into your own image directory first"
     );
     ensure!(
-        forgeusb_image::FileStamp::of(&source)? == request.plan.image.stamp,
+        forgeusb_image::FileStamp::of(&source)? == plan.image.stamp,
         "source identity changed"
     );
     let cancel = Cancellation::default();
@@ -128,13 +146,16 @@ fn run() -> Result<()> {
         let _ = io::stdin().lock().take(65).read_until(b'\n', &mut line);
         c.cancel();
     });
-    let report = forgeusb_linux::execute_opened(
-        &request.plan,
-        &request.confirmation,
-        source,
-        &cancel,
-        |p| emit(HelperEvent::Progress(p)),
-    )?;
+    let report = match confirmation {
+        Some(confirmation) => {
+            forgeusb_linux::execute_opened(&plan, &confirmation, source, &cancel, |p| {
+                emit(HelperEvent::Progress(p))
+            })?
+        }
+        None => forgeusb_linux::verify_opened(&plan, source, &cancel, |p| {
+            emit(HelperEvent::Progress(p))
+        })?,
+    };
     emit(HelperEvent::Complete(report));
     Ok(())
 }
@@ -153,20 +174,28 @@ mod tests {
         for args in [
             vec!["write", "--plan-json"],
             vec!["write", "--plan-json", "--protocol-v1"],
-            vec!["write", "--plan-json", "--protocol-v3"],
+            vec!["write", "--plan-json", "--protocol-v2"],
+            vec!["write", "--plan-json", "--protocol-v4"],
+            vec!["verify", "--plan-json", "--protocol-v2"],
+            vec!["erase", "--plan-json", "--protocol-v3"],
+            vec!["verify", "--plan-json", "--protocol-v3", "extra"],
+            vec!["--plan-json", "verify", "--protocol-v3"],
         ] {
             assert!(
                 validate_invocation(&args.into_iter().map(str::to_owned).collect::<Vec<_>>())
                     .is_err()
             );
         }
-        assert!(
-            validate_invocation(&[
-                "write".into(),
-                "--plan-json".into(),
-                forgeusb_linux::HELPER_PROTOCOL_ARGUMENT.into()
-            ])
-            .is_ok()
-        );
+        for (name, mode) in [("write", Mode::Write), ("verify", Mode::Verify)] {
+            assert_eq!(
+                validate_invocation(&[
+                    name.into(),
+                    "--plan-json".into(),
+                    forgeusb_linux::HELPER_PROTOCOL_ARGUMENT.into()
+                ])
+                .unwrap(),
+                mode
+            );
+        }
     }
 }

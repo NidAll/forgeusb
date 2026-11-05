@@ -1,5 +1,5 @@
 //! Minimal MBR/GPT serialization for new, retained regular-file disk images.
-use crate::{Layout, Scheme, plan_ntfs, plan_uefi_fat32};
+use crate::{Layout, Scheme, plan_data, plan_uefi_fat32};
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::File,
@@ -35,11 +35,15 @@ const ESP: [u8; 16] = [
 const BASIC_DATA: [u8; 16] = [
     0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44, 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7,
 ];
+// 0FC63DAF-8483-4772-8E79-3D69D8477DE4 (Linux filesystem data), mixed-endian.
+const LINUX_DATA: [u8; 16] = [
+    0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4,
+];
 fn type_guid(layout: &Layout) -> [u8; 16] {
-    if layout.partitions[0].filesystem == "ntfs" {
-        BASIC_DATA
-    } else {
-        ESP
+    match layout.partitions[0].filesystem.as_str() {
+        "ntfs" | "exfat" => BASIC_DATA,
+        "ext4" => LINUX_DATA,
+        _ => ESP,
     }
 }
 fn geometry(file: &File, layout: &Layout) -> Result<()> {
@@ -52,14 +56,14 @@ fn geometry(file: &File, layout: &Layout) -> Result<()> {
         m.len() == layout.capacity_bytes,
         "partition output size differs from layout"
     );
-    let planned = if layout
-        .partitions
-        .first()
-        .is_some_and(|p| p.filesystem == "ntfs")
-    {
-        plan_ntfs(layout.capacity_bytes, layout.sector_bytes, layout.scheme)?
-    } else {
-        plan_uefi_fat32(layout.capacity_bytes, layout.sector_bytes, layout.scheme)?
+    let planned = match layout.partitions.first().map(|p| p.filesystem.as_str()) {
+        Some(fs @ ("ntfs" | "exfat" | "ext4")) => plan_data(
+            layout.capacity_bytes,
+            layout.sector_bytes,
+            layout.scheme,
+            fs,
+        )?,
+        _ => plan_uefi_fat32(layout.capacity_bytes, layout.sector_bytes, layout.scheme)?,
     };
     ensure!(
         layout.partitions == planned.partitions,
@@ -85,10 +89,12 @@ fn mbr(layout: &Layout) -> Vec<u8> {
     b[451..454].copy_from_slice(&[0xfe, 0xff, 0xff]);
     b[450] = if layout.scheme == Scheme::Gpt {
         0xee
-    } else if p.filesystem == "ntfs" {
-        0x07
     } else {
-        0xef
+        match p.filesystem.as_str() {
+            "ntfs" | "exfat" => 0x07,
+            "ext4" => 0x83,
+            _ => 0xef,
+        }
     };
     put32(
         &mut b,

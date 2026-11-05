@@ -34,17 +34,23 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def write_copy(cli: str, source: Path, output: Path) -> Path:
+def prepared_digest(cli: str, image: Path) -> str:
+    """Data-range digest ForgeUSB reports for images it prepared itself."""
+    return json.loads(run([cli, "inspect", str(image), "--prepared", "--json"]).stdout)["sha256"]
+
+
+def write_copy(cli: str, source: Path, output: Path, prepared: bool = False) -> Path:
     """Exercise the real plan/write/verify CLI only against a new owned file."""
     target = output / "written.img"
+    flag = ["--prepared"] if prepared else []
     plan = json.loads(run([cli, "plan", str(source), "--device", str(target),
-                           "--test-file", "--json"]).stdout)
+                           "--test-file", *flag, "--json"]).stdout)
     if target.exists():
         raise RuntimeError("Read-only planning created a target")
     planfile = output / "plan.json"
     planfile.write_text(json.dumps(plan, indent=2) + "\n")
     run([cli, "write", "--plan", str(planfile), "--confirm", plan["confirmation"], "--json"])
-    run([cli, "verify", str(source), "--device", str(target), "--test-file", "--json"])
+    run([cli, "verify", str(source), "--device", str(target), "--test-file", *flag, "--json"])
     if digest(source) != digest(target):
         raise RuntimeError("CLI write/verify did not preserve the entire synthetic image")
     return target

@@ -10,6 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
 forgeusb-core = { path = "../forgeusb-core" }
+forgeusb-image = { path = "../forgeusb-image" }
 sha2.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
