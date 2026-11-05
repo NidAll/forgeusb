@@ -632,6 +632,10 @@ pub fn dependencies() -> serde_json::Value {
         ("mmd", "mmd"),
         ("fsck.fat", "fsck.fat"),
         ("ntfsfix", "ntfsfix"),
+        ("mkfs.exfat", "mkfs.exfat"),
+        ("fsck.exfat", "fsck.exfat"),
+        ("mkfs.ext4", "mkfs.ext4"),
+        ("e2fsck", "e2fsck"),
         ("xorriso", "xorriso"),
         ("qemu", "qemu-system-x86_64"),
     ];

@@ -1,6 +1,6 @@
 # Build and package ForgeUSB
 
-Use Rust stable >= 1.88, a Linux desktop session, a C linker, util-linux, fontconfig and libxkbcommon. Install `kdialog` (KDE) or `zenity` (fallback) for the native SELECT image chooser; pasting a path and pressing Enter works without either. Polkit and an active authentication agent are needed for installed physical-device writes. The GUI stays an ordinary user process. Do not install system packages automatically as part of testing.
+Use Rust stable >= 1.88, a Linux desktop session, a C linker, util-linux, fontconfig and libxkbcommon. Install `kdialog` (KDE) or `zenity` (fallback) for the native SELECT image chooser; without either, drop an image file on the window or pass `--image PATH`. Polkit and an active authentication agent are needed for installed physical-device writes. The GUI stays an ordinary user process. Do not install system packages automatically as part of testing.
 
 From the project root:
 

@@ -1,116 +1,177 @@
 # ForgeUSB
 
-A native Linux boot-media writer in Rust, with an Iced desktop app and a shared CLI engine. It writes raw and compressed disk/ISOHybrid images, prepares customizable Windows UEFI installation media from ISO9660/UDF images or extracted trees, and formats drives as FAT32, exFAT, NTFS or ext4. Writes require an exact reviewed confirmation and full source-byte read-back. This is an engineering build with [explicit release gates](docs/production-development.md), rather than a claim of complete Rufus parity.
+A native Linux tool for making bootable USB drives, written in Rust. It has a desktop app modeled on Rufus and a command-line tool, and both share one engine.
 
-**Physical writes erase the selected USB. No physical disk was overwritten during development.** Never run the GUI as root. Physical writes require a separately installed Polkit helper, an eligible unmounted USB with a stable identity, a reviewed plan, and typed confirmation of the drive. No device is automatically selected. Desktop admission is preliminary; the root helper must repeat authoritative system-wide checks before any physical write. The device layer rejects host/system storage, mounted partitions, active swap, device-mapper/RAID holders, uncertain backing topology and non-512-byte logical sectors.
+- Write Linux ISOs and disk images exactly as published, including compressed ones.
+- Build Windows 10/11 UEFI installer drives from an ISO, with optional setup tweaks.
+- Format a drive as FAT32, exFAT, NTFS or ext4.
+- Every write is reviewed first, confirmed by typing the drive's name, and read back to verify it.
+
+> **Status: engineering build.** It is tested on one disposable USB stick and in virtual machines, not across many PCs. Genuine Windows Setup has not been tested yet. See [what's missing](#not-supported-yet) and the [validation record](docs/validation.md).
 
 ## Screenshots
 
-Compact desktop interface using a synthetic demo image. No target is selected.
+| Disk or ISO image | Windows installer |
+|---|---|
+| ![Disk image mode with a demo image selected and no drive chosen](docs/gui-smoke.png) | ![Windows installer mode showing the Windows setup options](docs/gui-windows.png) |
+| **Format only** | **Confirmation** |
+| ![Format only mode with file system and volume label](docs/gui-format.png) | ![Confirmation dialog asking to type CREATE for a disposable file](docs/gui-plan-smoke.png) |
 
-![ForgeUSB main window with a synthetic demo image, READY status and no selected target](docs/usb-detection.png)
+The screenshots use synthetic demo files. With a real drive, the confirmation asks you to type the drive's short name (such as `sdb`) and lists every partition it will erase.
 
-Read-only operation review using synthetic demo paths in disposable-file mode. Writing remains disabled until the exact confirmation is entered; this capture did not start a write.
+## What it does
 
-![ForgeUSB confirmation dialog showing a source image, new disposable output file, byte counts and required confirmation](docs/gui-plan-smoke.png)
+**Disk and ISO images**
+- Writes vendor USB images and hybrid ISOs byte for byte. The partition table, file systems and boot loaders all stay exactly as the image has them.
+- Expands `.gz`, `.xz`, `.zst`, `.bz2` and single-file `.zip` images in your cache first, unprivileged.
+- Shows MD5, SHA-1, SHA-256 and SHA-512, and checks them against a `SHA256SUMS`-style file it finds beside the image.
 
-## Build and run
+**Windows installers**
+- Builds a FAT32 UEFI installer from a Windows ISO, choosing MBR or GPT and sizing it to the drive. Every copied file is verified.
+- Splits a large `install.wim` automatically.
+- Can add an `autounattend.xml` that:
+  - skips the TPM 2.0, Secure Boot and RAM checks;
+  - allows setup without a Microsoft account, or creates a named local account;
+  - applies this computer's regional settings;
+  - declines the privacy questions;
+  - turns off automatic BitLocker.
 
-Rust stable >=1.88 and a C linker are required. On Arch/CachyOS install build prerequisites through your normal package manager; see [installation](docs/installation.md). The desktop uses Wayland or X11 and a software renderer.
+**Formatting**
+- Creates an empty FAT32, exFAT, NTFS or ext4 drive with your label, on MBR or GPT, up to 2 TiB.
+- The file system is built in a private image file, never on the drive itself. Only its data is then written, so formatting a 64 GB stick takes seconds.
 
-```sh
-cargo build --release --locked
-./target/release/forgeusb-gui
-./target/release/forgeusb list --json
-./target/release/forgeusb inspect /absolute/path/linux.iso --json
-./target/release/forgeusb check-dependencies
+**Around the write**
+- **Unmount:** drives your desktop has mounted can be unmounted from the app.
+- **Safe removal:** the drive is powered off when verification finishes, so you can unplug it.
+- **Partitions:** the kernel picks up the new partitions without replugging.
+- **App conveniences:** drag and drop, speed and time remaining, and settings remembered between sessions.
+
+## Safety model
+
+ForgeUSB only ever offers **USB** drives. Internal disks, the system disk, SD card readers, RAID or device-mapper members, swap and anything it can't identify with certainty are refused. Nothing is ever selected for you.
+
+1. **Plan (read-only).** ForgeUSB records the source's SHA-256, the drive's identity (device number, serial and topology) and its capacity. The drive is never opened at this stage.
+2. **Confirm.** You review the drive, its size and the partitions that will be erased, then type its name.
+3. **Revalidate and write.** A small Polkit helper re-checks everything as root. It opens the source with *your* file permissions, takes an exclusive lock on the drive, writes, flushes and reads every byte back.
+
+The desktop app always runs as your normal user and refuses to run as root. Everything else runs unprivileged in your session: formatting tools, Windows extraction, decompression, unmount and power-off. The helper never unmounts anything, and refuses mounted drives. Details: [device safety](docs/device-safety.md) and [threat model](docs/threat-model.md).
+
+## Install
+
+You need Rust stable 1.88 or newer, a C linker, Python 3, Polkit with an authentication agent, and udisks2.
+
+Optional tools, by feature:
+
+| Feature | Packages |
+|---|---|
+| Windows installers | 7-Zip (`7z` or `7zz`), dosfstools, mtools, wimlib |
+| NTFS, exFAT, ext4 | ntfs-3g, exfatprogs, e2fsprogs |
+| SELECT file chooser | kdialog or zenity |
+
+ForgeUSB never installs packages for you.
+
+```bash
+bash packaging/install.sh --system
 ```
 
-For redistributable artifacts, use `python3 packaging/build.py build --release --locked`.
-This wrapper remaps personal source/cache paths in compiler diagnostics; ordinary
-Cargo builds are development artifacts. Packaging scripts use the wrapper.
+This builds as your user, then asks for your password once to copy a fixed list of files into `/usr`: the CLI, the GUI, the helper, its Polkit policy and the menu entry. Launch **ForgeUSB** from your application menu. To install without the helper, and so without physical writes, use `--user`. Check what's available with:
 
-This host's inherited linker name `x86_64-linux-gnu-gcc` was absent. The project-local `.cargo/config.toml` therefore selects `/usr/bin/cc` and one build job. Initial validation also used the matching per-command override and `CARGO_PROFILE_DEV_DEBUG=0`. No global toolchain, Ghidra, or Codex configuration was changed. In Fish use `env NAME=value cargo ...` for optional environment overrides.
-
-## Review, then write
-
-Planning is read-only and produces the exact source SHA-256, identity/topology snapshot, target capacity, strategy, warnings and confirmation text. Partition table, firmware mode, filesystems, labels and embedded bootloaders are preserved from the image.
-
-```sh
-./target/release/forgeusb plan /absolute/path/linux.iso --device /dev/sdX --json > plan.json
-./target/release/forgeusb write --plan plan.json
-./target/release/forgeusb verify /absolute/path/linux.iso --device /dev/sdX
+```bash
+forgeusb check-dependencies
 ```
 
-`verify` on a physical drive asks for Polkit authorization and runs `forgeusb-helper verify`, which revalidates the drive like a write but opens it read-only and only compares it with your image.
+More options, including staging, removal and the portable build, are in [installation](docs/installation.md).
 
-The write command prompts interactively. Noninteractive use requires BOTH the reviewed plan file and `--confirm 'EXACT confirmation FROM plan.json'`; there is no blanket `--yes` or system-disk override. A changed source/device invalidates the plan. Physical write privilege is obtained through fixed `/usr/bin/pkexec /usr/lib/forgeusb/forgeusb-helper write --plan-json --protocol-v3`. The helper revalidates the plan independently and only opens user-readable, user-owned source files with that user's filesystem credentials. See [device safety](docs/device-safety.md) and [threat model](docs/threat-model.md).
+## Using the app
 
-To exercise the complete write/verify path without USB hardware, choose a **new** output file:
+1. Plug in a USB drive and choose it under **Device**. If it's mounted, press **Unmount**.
+2. Press **SELECT**, or drop an image on the window. The **Image option** follows the file: a Windows ISO switches to *Windows installer*. Choose *Format only* to just erase and format the drive.
+3. Press **START**. Any preparation (expanding, building Windows media or formatting) happens in your cache, and the drive is not touched yet.
+4. Check the drive and what it contains, type its name, and press **START** again. Enter your password when Polkit asks.
+5. Wait for **DONE**. The drive is verified and safely removed.
 
-```sh
-./target/release/forgeusb plan /absolute/path/disk.img --device /absolute/path/NEW-test-copy.img --test-file --json > plan.json
-./target/release/forgeusb write --plan plan.json
-./target/release/forgeusb verify /absolute/path/disk.img --device /absolute/path/NEW-test-copy.img --test-file
+Keyboard shortcuts, advanced properties and the disposable-file test mode are covered in [the GUI guide](docs/gui.md).
+
+## Using the command line
+
+```bash
+forgeusb list                                    # disks, partitions and whether each can be used
+forgeusb checksum ~/Downloads/distro.iso         # MD5/SHA-1/SHA-256/SHA-512 + published-sum check
+forgeusb plan ~/Downloads/distro.iso --device /dev/sdX --json > plan.json
+forgeusb write --plan plan.json --eject          # asks you to type the confirmation
+forgeusb verify ~/Downloads/distro.iso --device /dev/sdX
 ```
 
-Disposable-file mode never overwrites an existing file. The compact Rufus-style GUI exposes the same mode under advanced drive properties. SELECT or Ctrl+O opens a native file chooser; START or Ctrl+P opens the read-only review. Writing requires typing the drive's short name (or CREATE for a file) in that dialog. Esc dismisses or cancels. See [GUI details](docs/gui.md).
+Windows installer, sized to the drive:
 
-`--json` emits a JSON document for read-only queries and newline-delimited progress/completion events for write/verify. Preparation/formatting commands emit one final JSON report on stdout and progress
-on stderr. Errors are JSON on stderr. Exit status: 0 success; 1 operation/safety/dependency failure; 2 invalid CLI syntax. Ctrl+C requests cancellation and currently returns operation failure (1). A partial write is not rolled back. Cancellation takes effect between I/O chunks and cannot interrupt a kernel I/O call already blocked.
-
-## What is supported
-
-- Live whole-disk/partition discovery, filesystem/mount information, stable identity checks, and periodic GUI hotplug refresh.
-- Bounded ISO9660/UDF recognition, El Torito validation-header inspection, MBR/GPT primary metadata checks, SHA-256, disk/ISOHybrid strategy selection.
-- Streaming raw writes with a 1 MiB buffer, exclusive kernel device claim, flush and complete source-length byte comparison.
-- Windows UEFI media preparation: bounded ISO9660/UDF extraction, descriptor-based tree snapshots, WIM verification/splitting, MBR/GPT FAT32 construction and per-file SHA-256 read-back. The resulting image goes through the same reviewed USB write path. The GUI exposes both Windows modes.
-- Windows setup customization through a generated `autounattend.xml`: TPM/Secure Boot/RAM requirement bypass, no Microsoft account, a named local account, host regional settings, privacy questions and BitLocker auto-encryption.
-- Device-sized FAT32, exFAT, NTFS and ext4 formatting with MBR/GPT partition tables, filesystem diagnostics, partition read-back and atomic publication. Images are sparse: only data ranges plus the first and last 2 MiB are written and verified. Filesystem tools never receive a physical device.
-- Unprivileged expansion of gzip, xz, zstd, bzip2 and single-file zip images before review; MD5/SHA-1/SHA-256/SHA-512 checksums with automatic published-checksum lookup.
-- Unmount before planning and safe power-off after verification through UDisks2 in the desktop session (never in the root helper), and partition-table re-read after writing.
-- Stronger standalone GPT validation and bounded removal/read-back of recognized stale backup GPT metadata beyond the source range on a larger physical target.
-
-Windows preparation has been validated with synthetic installer-shaped trees, real small WIM containers and an original EFI test program under OVMF. **Genuine Windows Setup has not been tested.** Windows BIOS/NTFS boot, UEFI:NTFS installation, generic Linux extraction, persistence, ESD conversion and 4K-sector targets remain unavailable; see the [Rufus gap report](docs/rufus-gap-report.md). Secure Boot depends on the source loader and firmware trust/revocation state. Read-back verifies storage bytes, not firmware compatibility or power-loss persistence. For raw images most unused target space remains untouched; only recognized stale target-end GPT metadata is cleared separately. GPT is preserved at the source image's size, without relocation to a larger device's end. See the [compatibility matrix](docs/compatibility.md).
-
-## Windows UEFI media and formatting
-
-Preparation runs unprivileged and creates a new ordinary image file. Install the optional OS packages providing **7z/7zz, dosfstools, mtools and wimlib** (plus **exfatprogs**/**e2fsprogs** for exFAT/ext4 and **udisks2** for unmount/eject); ForgeUSB does not install dependencies or download Windows/bootloader files. Allow disk space for the extracted snapshot, filesystem and final image. Scratch files are created beside the output, avoiding RAM-backed `/tmp` limits.
-
-```sh
-forgeusb prepare-windows /path/windows.iso --output /path/NEW-windows.img --device /dev/sdX \
+```bash
+forgeusb prepare-windows ~/Downloads/Win11.iso --output ~/win11.img --device /dev/sdX \
   --scheme gpt --bypass-requirements --no-online-account --local-account alex --regional=host
-forgeusb plan /path/NEW-windows.img --device /dev/sdX --prepared --json > plan.json
+forgeusb plan ~/win11.img --device /dev/sdX --prepared --json > plan.json
 forgeusb write --plan plan.json --eject
+```
 
-forgeusb format-image --output /path/NEW-exfat.img --filesystem exfat --device /dev/sdX --label DATA
-forgeusb decompress /path/image.img.xz --output /path/NEW-image.img --device /dev/sdX
-forgeusb checksum /path/windows.iso
+Other preparation commands:
+
+```bash
+forgeusb format-image --output ~/data.img --filesystem exfat --device /dev/sdX --label DATA
+forgeusb decompress ~/Downloads/image.img.xz --output ~/image.img --device /dev/sdX
 forgeusb unmount /dev/sdX
 ```
 
-Both Windows partition schemes target **UEFI**; MBR does not install BIOS boot code. `--device` sizes the image to that drive (read-only); `--prepared` tells plan/verify the image is ForgeUSB-made so only its data ranges are transferred. Oversized `install.wim` is split automatically; oversized solid ESD and other oversized files are refused. Formatting creates a blank data filesystem and adds no bootloader. In the GUI a Windows ISO selects **Windows installer** automatically; START first prepares a private image in the user cache, then opens the USB review. Closing/cancelling preparation cannot start a USB write. [Windows details and limits](docs/windows.md).
+**Notes on these commands:**
+- **Typing the confirmation:** `write` asks for it interactively. Scripts must pass the reviewed plan *and* `--confirm 'EXACT TEXT FROM plan.json'`; there is no `--yes`.
+- **`--prepared`:** use it only for images made by `prepare-windows` or `format-image`. It skips their unused space. Never use it for downloaded or decompressed images, whose zeros are real data.
+- **`verify` on a drive** asks for your password. The helper then compares the drive with the image without writing to it.
+- **Machine output:** `--json` gives JSON documents and progress events.
+- **Exit codes:** 0 means success, 1 a failure or refusal, 2 bad arguments. Ctrl+C cancels between chunks, and an interrupted write is not rolled back.
 
-## Tests and research
+To try the whole path without hardware, write to a **new** file with `--device /path/NEW.img --test-file`.
 
-```sh
+## Not supported yet
+
+- Windows on BIOS-only PCs, NTFS Windows media with UEFI:NTFS, and ESD-to-WIM conversion.
+- Extracting Linux ISOs that aren't hybrid, and persistence partitions.
+- Drives with 4 KiB logical sectors, and SD card readers (refused on purpose).
+- Secure Boot is never guaranteed: it depends on the image's boot loaders and the PC's firmware.
+
+The [Rufus gap report](docs/rufus-gap-report.md) lists every difference from Rufus 4.15 and the plan for each. The [compatibility matrix](docs/compatibility.md) separates what was boot-tested from what was only structurally verified.
+
+## Development
+
+```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo build --release
+python3 packaging/build.py build --release --locked
 python3 tests/file-integration.py --cli target/release/forgeusb
 python3 tests/media-integration.py --cli target/release/forgeusb --output test-output/NEW-media
 python3 tests/boot-integration.py --cli target/release/forgeusb --output test-output/NEW-boot
 ```
 
-All destructive integration fixtures are newly owned ordinary files. Loop/physical tests are not silently enabled. QEMU tests attach only an explicitly selected regular image, disable networking and use fresh OVMF NVRAM. [Validation results](docs/validation.md) distinguish synthetic layouts, virtual Linux startup and untested physical/Windows behavior. [Milestones](docs/milestones.md) records delivered functions and remaining engineering work.
+The integration tests write only to new files they own: no loop devices, no physical drives and no network. QEMU boot tests use fresh firmware variables. The GUI tests (`tests/gui-smoke.py`, `tests/gui-windows.py`) run on a private Xvfb display and never touch your desktop.
 
-Rufus v4.15 source and its matching official executable were investigated using REA 6.5.0 and Ghidra 12.1.4. [Research index](docs/reverse-engineering/README.md) links source architecture, diagrams, function mappings, binary evidence and limitations. Development references remain local under `references/` and are excluded from packages. [Dependency decisions](docs/dependencies.md), [license inventory](docs/dependency-licenses.json) and [third-party notices](THIRD_PARTY_NOTICES.md) document the supply chain.
+Use `packaging/build.py` for release artifacts. It removes personal paths from compiler output. This repository's `.cargo/config.toml` selects `/usr/bin/cc` because the host's default linker name was missing.
 
-## Packaging
+**Project layout:**
 
-Run `bash packaging/install.sh --system` as your desktop user to build and install with administrator authentication for the final copy. The application menu launcher and window include the ForgeUSB icon. `--user` installs desktop/CLI only; `--stage /tmp/forgeusb-NEW-stage --no-build` prepares a new disposable staging tree. See [installation and removal](docs/installation.md).
+| Path | Contents |
+|---|---|
+| `apps/forgeusb-gui`, `apps/forgeusb-cli` | The two front ends |
+| `crates/forgeusb-privileged` | The Polkit helper |
+| `crates/forgeusb-linux` | The planner, writer and UDisks session actions |
+| `crates/forgeusb-device` | USB discovery and admission |
+| `crates/forgeusb-image`, `crates/forgeusb-verify` | Inspection, checksums and range digests |
+| `crates/forgeusb-media`, `crates/forgeusb-partition`, `crates/forgeusb-filesystem` | Formatting and partitioning |
+| `crates/forgeusb-windows` | Windows tree, WIM and `autounattend.xml` handling |
+| `crates/forgeusb-boot`, `crates/forgeusb-core` | Boot strategy selection and shared types |
 
-`make -f packaging/Makefile install DESTDIR=/tmp/forgeusb-stage` stages binaries, desktop entry, original icon, license texts and Polkit policy without privileged installation. A real `/usr` installation is a separate administrator step. `bash packaging/make-source-archive.sh` creates a deterministic source archive and an Arch PKGBUILD with the exact checksum. Debian/RPM recipes are starting points and have not been built in clean distribution containers. `bash packaging/make-portable.sh` builds a local portable directory archive for this host's glibc. A portable directory can run the GUI/CLI; physical writes still require the trusted system helper/policy. No online updates or telemetry are implemented.
+[Milestones](docs/milestones.md) and the [development plan](docs/development-plan.md) track progress.
 
-GPL-3.0-or-later. Independent implementation; no upstream executable or bootloader is distributed with ForgeUSB.
+## Research and licensing
+
+ForgeUSB is an independent implementation. The behavior of Rufus 4.15 was studied from its source and its official binary; see the [research index](docs/reverse-engineering/README.md). No Rufus code, boot loaders, Microsoft files or other upstream binaries are included.
+
+Supply-chain documents: [dependencies](docs/dependencies.md), the [license inventory](docs/dependency-licenses.json) and the [third-party notices](THIRD_PARTY_NOTICES.md).
+
+Licensed under GPL-3.0-or-later.

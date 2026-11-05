@@ -43,6 +43,8 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--small", action="store_true", help="exercise the minimum 440x540 window size")
     parser.add_argument("--advanced", action="store_true", help="show advanced drive properties")
     parser.add_argument("--screenshot", action="store_true", help="retain screenshots for visual review")
+    parser.add_argument("--mode", choices=("raw", "windows-mbr", "windows-gpt", "format"),
+                        help="launch with this Image option")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -176,6 +178,8 @@ def run_child(args: argparse.Namespace) -> dict:
             command = [str(args.binary), "--image", "" if args.browse else str(args.source), "--smoke-test"]
             if not args.device_mode:
                 command.extend(["--test-output", str(target)])
+            if args.mode:
+                command.extend(["--mode", args.mode])
             app = subprocess.Popen(
                 command,
                 env=env,
@@ -310,6 +314,8 @@ def main() -> int:
         command.append("--advanced")
     if args.screenshot:
         command.append("--screenshot")
+    if args.mode:
+        command.extend(["--mode", args.mode])
     process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, start_new_session=True)
     try:

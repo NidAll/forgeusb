@@ -61,8 +61,10 @@ also paste one.
 
 Public screenshots use synthetic demo files and generic temporary paths; personal directories are excluded.
 
-![Compact main dialog](gui-smoke.png)
-![Read-only confirmation](gui-plan-smoke.png)
+![Disk image mode with a synthetic demo image and no drive selected](gui-smoke.png)
+![Windows installer mode with setup options](gui-windows.png)
+![Format only mode](gui-format.png)
+![Confirmation dialog for a disposable output file](gui-plan-smoke.png)
 
 In *Disk or ISO image* mode, partition scheme, target system, volume label and
 file system show "From image": the raw engine preserves the image's layout and
